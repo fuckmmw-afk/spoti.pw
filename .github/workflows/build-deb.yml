@@ -3,7 +3,7 @@ name: Build JamesDSP deb
 on:
   workflow_dispatch:
   push:
-    branches: [restore-jamesdsp-0.50.0]
+    branches: [main]
 
 permissions:
   contents: read

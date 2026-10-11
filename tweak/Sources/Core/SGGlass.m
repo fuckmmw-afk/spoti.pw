@@ -1,3 +1,4 @@
+#import <objc/message.h>
 #import "SGGlass.h"
 #import "SGRuntime.h"
 
@@ -53,15 +54,21 @@ void SGShapeGlass(UIView *glass, CGFloat radius, BOOL capsule) {
     Class config = NSClassFromString(@"UICornerConfiguration");
     Class cornerRadius = NSClassFromString(@"UICornerRadius");
     id shape = nil;
-    if (config && [glass respondsToSelector:@selector(setCornerConfiguration:)]) {
-        if (capsule && [config respondsToSelector:@selector(capsuleConfiguration)]) {
-            shape = [config capsuleConfiguration];
-        } else if ([config respondsToSelector:@selector(configurationWithUniformRadius:)] && [cornerRadius respondsToSelector:@selector(fixedRadius:)]) {
-            shape = [config configurationWithUniformRadius:[cornerRadius fixedRadius:radius]];
+    SEL setCorner = NSSelectorFromString(@"setCornerConfiguration:");
+    SEL capsuleSelector = NSSelectorFromString(@"capsuleConfiguration");
+    SEL uniformSelector = NSSelectorFromString(@"configurationWithUniformRadius:");
+    SEL fixedSelector = NSSelectorFromString(@"fixedRadius:");
+    id (*factory)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id (*factoryWithObject)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+    if (config && [glass respondsToSelector:setCorner]) {
+        if (capsule && [config respondsToSelector:capsuleSelector]) {
+            shape = factory(config, capsuleSelector);
+        } else if ([config respondsToSelector:uniformSelector] && [cornerRadius respondsToSelector:fixedSelector]) {
+            shape = factoryWithObject(config, uniformSelector, factoryWithObject(cornerRadius, fixedSelector, @(radius)));
         }
     }
     if (shape) {
-        [glass setCornerConfiguration:shape];
+        ((void (*)(id, SEL, id))objc_msgSend)(glass, setCorner, shape);
         glass.clipsToBounds = NO;
     } else {
         glass.layer.cornerRadius = capsule ? glass.bounds.size.height / 2 : radius;

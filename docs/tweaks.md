@@ -26,9 +26,9 @@
     trees/                      recorded view trees, one per screen; the input for every new hook. trees/clean/ holds
                                 the numbered snapshots per screen of record-session.py, taken of Spotify as it came
     plist/                      Info.plist overrides merged into the app (turns UIDesignRequiresCompatibility off)
-    vendor/                     AutoFLEX deb; audio/, the third-party C of the audio effects (libbs2b, WDL's EEL2) and
-                                the EEL2 parser of the mod's own, built by its own Makefile into a static library the
-                                tweak links (its README names the upstream commits and the licenses)
+    vendor/                     AutoFLEX deb; libjamesdsp, JamesDSP's engine with RootlessJamesDSP's Liveprog scripts and DDC
+                                presets, built by its own Makefile into a static library the tweak links (its README
+                                names the upstream commits and every local change)
     ipa/, out/                  decrypted Spotify IPA in, built IPAs out (both gitignored)
 
 `tweak/Sources/Shared/Flags/SGFlagList.m` is generated from the IPA and gitignored, as are the
@@ -117,15 +117,13 @@ Shared:
                   (SpeedPitchMenu.x, SpeedPitch.x, SGTimePitch.m). The block goes into Spotify's own context menu sheet
                   and is drawn from its own measures, not the Kit's, so it sits there under either look. Tested on the
                   Mac against harness/pitch/ and in the simulator against harness/speed/ and harness/menu/
-    AudioEffects/ the audio effects on Spotify's sound (AudioEffects.h has the keys and the page's calls): Spotify's
-                  import of AudioOutputUnitStart is rebound, as Music Haptics does, and a render notify on its RemoteIO
-                  unit runs each finished buffer through the mod's own engine, re-blocked to 1024 frames one block late,
-                  in place (AudioEffects.x, SGDSPEngine.m). The buffers are in the unit's output format, the
-                  hardware's, not the client format Spotify sets. The effects are the SGDSP*.m files, on Accelerate,
-                  Apple's Reverb2 unit, libbs2b and EEL2 (vendor/audio). Settings apply as they change, on a queue of
-                  its own; the file effects read their files from Documents/spoti.pw/Audio effects
-                  (AudioEffectsFiles.m). Tested on the Mac against harness/audio-effects/, the hook in the simulator
-                  against its sim/
+    JamesDSP/     JamesDSP's effects on Spotify's sound (JamesDSP.h has the keys and the page's calls): Spotify's import of
+                  AudioOutputUnitStart is rebound, as Music Haptics does, and a render notify on its RemoteIO unit runs
+                  each finished buffer through SGDSPEngine.m, libjamesdsp re-blocked to 1024 frames one block late, in
+                  place (JamesDSP.x). The buffers are in the unit's output format, the hardware's, not the client format
+                  Spotify sets. Settings apply as they change, on a queue of its own; the file effects read their files
+                  from Documents/spoti.pw/JamesDSP (JamesDSPFiles.m). Tested on the Mac against harness/jamesdsp/,
+                  the hook in the simulator against its sim/
     Haptics/      Vibrations (Haptics.h lists its files): a tap of UIKit's feedback generators for the player's and the now
                   playing bar's controls, the scrubber's tenths and ends, cover swipes, gestures and the lyrics page's tap to
                   seek, at the strength set for them (ControlHaptics.x, SGFeedback.m); and Music Haptics, Core Haptics
@@ -269,10 +267,10 @@ Strength (20 to 200%, 100% being how it first shipped) and Follows, Everything (
 snare and a rumble under the bass), Beat (the taps without the rumble) or Bass (the kicks' taps and the
 rumble), all applying straight away. Live Activity, on iOS 17 and up under either look: its switch and which view it
 shows, Lyrics, Queue or Control menu, both
-applying straight away, the row reading out the view or Off. Audio effects, in either look (Shared/AudioEffects/AudioEffectsPage.m):
-the effects' switch with what the engine is doing under it, then a card per effect, each opening out into its
-sliders, choices, curve or file library while its switch is on, everything applying as it changes; the row reads
-out Off, On or how many effects are on. Home & Library, in the native look only:
+applying straight away, the row reading out the view or Off. Audio effects, in either look (Shared/JamesDSP/JamesDSPPage.m):
+JamesDSP's switch with what the engine is doing under it, then a card per effect in RootlessJamesDSP's order, each
+opening out into its sliders, choices, curve or file library while its switch is on, everything applying as it
+changes; the row reads out Off, On or how many effects are on. Home & Library, in the native look only:
 the Gradient page (the wash behind the top of Home in one of eight colours, at three strengths and
 four heights) and the Home flags, the parts of Home to hide including the DJ button and badge, the
 playlist header, buttons and pills to hide, and the Library flags. Then Privacy & clutter

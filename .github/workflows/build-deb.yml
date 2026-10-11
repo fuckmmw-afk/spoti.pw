@@ -1,0 +1,33 @@
+name: Build JamesDSP deb
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [restore-jamesdsp-0.50.0]
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      PACKAGE_VERSION: 0.50.0-jdsp1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
+      - name: Install build tools
+        run: brew install make dpkg ldid
+      - name: Build package
+        run: env -u MAKELEVEL gmake -C tweak clean package SG_VERSION="$PACKAGE_VERSION"
+      - name: Publish package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spoti.pw-0.50.0-jdsp1
+          path: tweak/packages/*.deb
+          if-no-files-found: error

@@ -1,7 +1,7 @@
 // Settings: a Mod Settings row at the end of Spotify's settings list opens the mod's own page: the
 // Appearance card with Redesigned UI, then a page per part of Spotify, each holding what that part
 // offers in the stored look (App/Pages.m: Navbar, Player, and Home & Library for the native look), Audio
-// effects (Shared/AudioEffects, in either look and applying straight away), Privacy & clutter
+// effects (Shared/JamesDSP, in either look and applying straight away), Privacy & clutter
 // and Labs, All flags, a searchable list of every flag with an override per flag, and Mod, the
 // build, its updates and links. The same row leads the side drawer's list (trees/test6.txt), above
 // Your plan, so the page is a tap from Home, and holding Home on the tab bar opens it too. The tweaks read the switches when they run, so a change
@@ -19,7 +19,7 @@
 #import "Native/Home/Home.h"
 #import "Shared/Privacy/Privacy.h"
 #import "Shared/Flags/Flags.h"
-#import "Shared/AudioEffects/AudioEffectsPage.h"
+#import "Shared/JamesDSP/JamesDSPPage.h"
 #import "Shared/LiveActivity/LiveActivity.h"
 #import "App/About/About.h"
 #import "App/Donate/Donate.h"

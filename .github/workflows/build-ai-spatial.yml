@@ -1,0 +1,102 @@
+name: Build AI Spatial tweak
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "Build milestone: A=1 B=2 C=3 D=4 E=5 F=6 G=7"
+        required: true
+        default: "1"
+        type: choice
+        options: ["1", "2", "3", "4", "5", "6", "7"]
+  push:
+    paths:
+      - "ai_spatial/**"
+      - "bridge/**"
+      - "tweak/Sources/App/ModSettings.x"
+      - "tweak/Sources/Shared/AISpatial/**"
+      - "deliverable/AI-Spatial-Stage04.md"
+      - ".github/workflows/build-ai-spatial.yml"
+  pull_request:
+    paths:
+      - "ai_spatial/**"
+      - "bridge/**"
+      - "tweak/Sources/App/ModSettings.x"
+      - "tweak/Sources/Shared/AISpatial/**"
+      - "deliverable/AI-Spatial-Stage04.md"
+      - ".github/workflows/build-ai-spatial.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SPATIAL_PHASE: ${{ inputs.phase || '1' }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make perl dpkg-dev git unzip xz-utils
+
+      - name: Install Theos
+        run: |
+          git clone --depth 1 --recursive https://github.com/theos/theos.git "$RUNNER_TEMP/theos"
+          git clone --depth 1 https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          cp -a "$RUNNER_TEMP/sdks/." "$RUNNER_TEMP/theos/sdks/"
+          mkdir -p "$RUNNER_TEMP/theos/toolchain"
+          curl -fsSL https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP/theos/toolchain"
+
+      - name: Configure xcrun shim for the JamesDSP static library
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/xcrun" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *"--find clang"*) echo "$RUNNER_TEMP/theos/toolchain/linux/iphone/bin/clang" ;;
+            *"--find libtool"*) echo "$RUNNER_TEMP/theos/toolchain/linux/iphone/bin/libtool" ;;
+            *"--show-sdk-path"*) echo "$RUNNER_TEMP/theos/sdks/iPhoneOS16.5.sdk" ;;
+            *) echo "unsupported xcrun invocation: \$*" >&2; exit 1 ;;
+          esac
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/xcrun"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Refuse model/IPA artifacts
+        run: |
+          ! find . -type f \( -iname '*.ipa' -o -iname '*.mlmodel' -o -iname '*.mlmodelc' -o -iname '*.mlpackage' -o -iname 'weight.bin' \) -print -quit | grep -q .
+
+      - name: Run host stream-core tests
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        run: make -C ai_spatial test
+
+      - name: Build the standalone tweak
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        run: make -C ai_spatial clean stage SPATIAL_PHASE="$SPATIAL_PHASE"
+
+      - name: Build the JamesDSP bridge
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        run: make -C bridge clean all
+
+      - name: Publish only tweak files and small resources
+        run: |
+          mkdir -p artifact
+          cp ai_spatial/.theos/_/Library/MobileSubstrate/DynamicLibraries/aispatial.dylib artifact/
+          cp ai_spatial/.theos/_/Library/MobileSubstrate/DynamicLibraries/aispatial.plist artifact/
+          cp bridge/.theos/obj/chromajdsp.dylib artifact/
+          cp bridge/chromajdsp.plist artifact/
+          cp ai_spatial/README.md artifact/
+          cp deliverable/AI-Spatial-Stage02.md artifact/
+          cp deliverable/AI-Spatial-Stage03.md artifact/
+          cp deliverable/AI-Spatial-Stage04.md artifact/
+          ! find artifact -type f \( -iname '*.ipa' -o -iname '*.mlmodel*' -o -iname '*.mlpackage' -o -iname 'weight.bin' \) -print -quit | grep -q .
+
+      - name: Upload tweak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-spatial-phase-${{ env.SPATIAL_PHASE }}
+          path: artifact/

@@ -20,6 +20,7 @@
 #import "Shared/Privacy/Privacy.h"
 #import "Shared/Flags/Flags.h"
 #import "Shared/JamesDSP/JamesDSPPage.h"
+#import "Shared/AISpatial/AISpatialSettings.h"
 #import "Shared/LiveActivity/LiveActivity.h"
 #import "App/About/About.h"
 #import "App/Donate/Donate.h"
@@ -50,7 +51,10 @@ static UIViewController *modSettingsPage(void) {
     audioEffects.value = ^NSString *{ return SGDSPSummary(); };
     // Home & Library holds only the native look's switches, so the redesign has no such page; the
     // Live Activity works under both, and only where ActivityKit's card does.
+    SGModRow *aiSpatial = pageRow(@"AI Spatial Engine", @"waveform.path.ecg", ^UIViewController *{ return SGAISpatialEnginePage(); });
+    aiSpatial.value = ^NSString *{ return SGAISpatialSummary(); };
     NSMutableArray<SGModRow *> *parts = [NSMutableArray arrayWithArray:@[
+        aiSpatial,
         pageRow(@"Navbar", @"dock.rectangle", ^UIViewController *{ return SGNavbarPage(); }),
         pageRow(@"Player", @"play.circle", ^UIViewController *{ return SGPlayerSettingsPage(); }),
         audioEffects,

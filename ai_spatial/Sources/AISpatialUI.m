@@ -581,15 +581,16 @@ static void AISpatialRewriteText(UIViewController *page) {
 
 static BOOL AISpatialLooksLikeRootMenu(UIViewController *controller) {
     if (!controller || AISpatialLooksLikeSingPage(controller) || !AISpatialTable(controller)) return NO;
-    __block BOOL hasSing = NO, hasAudioEffects = NO, hasMod = NO;
+    __block BOOL hasSing = NO, hasAudioEffects = NO, hasMod = NO, hasAI = NO;
     AISpatialWalk(controller.view, ^(UIView *view) {
         if (![view isKindOfClass:UILabel.class]) return;
         NSString *text = ((UILabel *)view).text ?: @"";
         hasSing |= AISpatialEquals(text, @"Sing");
         hasAudioEffects |= AISpatialEquals(text, @"Audio effects");
         hasMod |= AISpatialEquals(text, @"Mod");
+        hasAI |= AISpatialEquals(text, @"AI Spatial engine") || AISpatialEquals(text, @"AI Spatial Engine");
     });
-    return hasSing && hasAudioEffects && hasMod;
+    return hasSing && hasAudioEffects && hasMod && !hasAI;
 }
 
 static void AISpatialInstallRootMenuRow(UIViewController *controller) {

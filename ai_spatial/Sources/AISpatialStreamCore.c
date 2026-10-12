@@ -23,6 +23,7 @@ bool ASStreamInit(ASStreamCore *c) {
     atomic_init(&c->discontinuities, 0); atomic_init(&c->input_dropped, 0); atomic_init(&c->output_dropped, 0);
     atomic_init(&c->stale_outputs, 0); atomic_init(&c->requested_mode, 0); atomic_init(&c->active_mode, 0);
     atomic_init(&c->spatial_applied, 0);
+    atomic_init(&c->spatial_base_applied, 0);
     atomic_init(&c->rate_bits, 0);
     atomic_init(&c->spatial.event_head, 0); atomic_init(&c->spatial.event_tail, 0);
     atomic_init(&c->spatial.scheduled, 0); atomic_init(&c->spatial.rejected, 0); atomic_init(&c->spatial.cancelled, 0); atomic_init(&c->spatial.enabled, 0); atomic_init(&c->spatial.route, ASSpatialRouteUniversalStereo);
@@ -310,6 +311,24 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
                 }
                 float mix_l = has_stems ? mix_vl * c->vocal_gain + mix_il * c->instrumental_gain : original_l;
                 float mix_r = has_stems ? mix_vr * c->vocal_gain + mix_ir * c->instrumental_gain : original_r;
+                /* Live keeps a stable, low-risk base scene even between sparse
+                 * accent events. This is the audible part of Stereo Width: it
+                 * widens the reconstructed mid/side pair only in Live, while
+                 * Original and Shadow remain bit-for-bit on the existing path. */
+                if (has_stems && mode == 2 && atomic_load_explicit(&c->spatial.enabled, memory_order_acquire) &&
+                    atomic_load_explicit(&c->spatial.stereo_width, memory_order_relaxed)) {
+                    float width=ASBitsFloat(atomic_load_explicit(&c->spatial.width_bits,memory_order_relaxed));
+                    float intensity=ASBitsFloat(atomic_load_explicit(&c->spatial.intensity_bits,memory_order_relaxed));
+                    ASSpatialRoute route=(ASSpatialRoute)atomic_load_explicit(&c->spatial.route,memory_order_relaxed);
+                    if (route != ASSpatialRouteMonoSafe && width > 0 && intensity > 0) {
+                        float mid=.5f*(mix_l+mix_r), side=.5f*(mix_l-mix_r);
+                        float center=ASBitsFloat(atomic_load_explicit(&c->spatial.center_bits,memory_order_relaxed));
+                        float gain=1.0f + .35f*width*intensity*(1.0f-.35f*ASSpatialClamp(center,0,1));
+                        side*=ASSpatialClamp(gain,1.0f,1.35f);
+                        mix_l=mid+side; mix_r=mid-side;
+                        atomic_fetch_add_explicit(&c->spatial_base_applied,1,memory_order_relaxed);
+                    }
+                }
                 out_l = original_l + c->stem_weight * (mix_l - original_l);
                 out_r = original_r + c->stem_weight * (mix_r - original_r);
                 /* Align the delayed analysis path over 20 ms.  The first

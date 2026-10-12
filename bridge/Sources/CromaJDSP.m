@@ -415,7 +415,7 @@ __attribute__((constructor)) static void chromaJDSPInit(void) {
     }];
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gConfigQueue);
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_MSEC * 100);
-    dispatch_source_set_event_handler(timer, ^{ applySettings(); });
+    dispatch_source_set_event_handler(timer, ^{ resolveAISpatialBridge(); applySettings(); });
     dispatch_resume(timer);
     NSLog(@"[chroma-jdsp] sound effects bridge loaded");
 }

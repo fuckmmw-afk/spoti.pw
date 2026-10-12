@@ -54,6 +54,7 @@ typedef struct {
     _Atomic(uint64_t) overflows, underruns, fallback_transitions, discontinuities;
     _Atomic(uint64_t) input_dropped, output_dropped, stale_outputs;
     _Atomic(uint64_t) spatial_applied;
+    _Atomic(uint64_t) spatial_base_applied;
     ASStreamSpatialState spatial;
     _Atomic(int) requested_mode, active_mode;
     _Atomic(uint64_t) rate_bits;

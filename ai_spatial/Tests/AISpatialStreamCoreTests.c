@@ -184,6 +184,7 @@ static void test_spatial_event_is_future_stem_delta(void) {
         position+=count;
     }
     assert(changed); assert(atomic_load(&core.spatial_applied)>0);
+    assert(atomic_load(&core.spatial_base_applied)>0);
     ASStreamDestroy(&core);
 }
 

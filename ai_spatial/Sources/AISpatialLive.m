@@ -427,7 +427,12 @@ __attribute__((visibility("default"))) void AISpatialLiveScheduleAccent(uint64_t
 }
 __attribute__((visibility("default"))) AISpatialLiveMode AISpatialLiveGetMode(void) { return gCore ? (AISpatialLiveMode)atomic_load(&gCore->requested_mode) : AISpatialLiveModeOriginal; }
 __attribute__((visibility("default"))) void AISpatialLiveRefreshConfiguration(void) {
-    if (gCore) ASConfigureSpatial(gCore, atomic_load(&gCore->active_mode) == AISpatialLiveModeLive);
+    /* Configuration changes arrive before the render boundary commits the
+     * requested mode. Reading active_mode here could immediately turn Live
+     * spatial processing back off, leaving the UI on Live with a disabled
+     * renderer. Use the requested mode; the render callback will apply the
+     * epoch transition safely on its next block. */
+    if (gCore) ASConfigureSpatial(gCore, atomic_load(&gCore->requested_mode) == AISpatialLiveModeLive);
 }
 __attribute__((visibility("default"))) void AISpatialLiveReset(double sampleRate) { if (gCore) ASStreamRequestReset(gCore); ASAccentDetectorReset(); }
 __attribute__((visibility("default"))) void AISpatialLiveProcessStereo(float *l, float *r, uint32_t frames, double rate, const AudioTimeStamp *ts) {

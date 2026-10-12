@@ -33,6 +33,11 @@ typedef struct {
     float direction;
     float duration_seconds;
     float tail_seconds;
+    /* Optional authored endpoints.  When has_positions is false the motion
+     * uses the source position and the type-specific gesture below. */
+    ASSpatialPosition start_position;
+    ASSpatialPosition end_position;
+    bool has_positions;
 } ASSpatialMotion;
 
 typedef struct {

@@ -58,6 +58,9 @@ bool ASSpatialScenePlanEvent(const ASSpatialScene *scene, const ASSpatialEventPl
         event->stem > ASSpatialStemInstrumental || event->motion.type > ASSpatialMotionReflection ||
         !isfinite(event->intensity) || !isfinite(event->priority) || !isfinite(event->motion.intensity) ||
         !isfinite(event->motion.direction)) return false;
+    if (event->motion.has_positions &&
+        (!isfinite(event->motion.start_position.x) || !isfinite(event->motion.start_position.y) || !isfinite(event->motion.start_position.z) ||
+         !isfinite(event->motion.end_position.x) || !isfinite(event->motion.end_position.y) || !isfinite(event->motion.end_position.z))) return false;
     float eventDuration = (float)((double)(event->end_sample - event->start_sample) / scene->sample_rate);
     float duration = ASSpatialMotionDuration(&event->motion, eventDuration, .45f);
     if (duration <= 0) return false;
@@ -79,6 +82,13 @@ ASSpatialPosition ASSpatialMotionPosition(const ASSpatialSource *source,
     float u = smoothstep((float)(seconds / motion->duration_seconds));
     float amount = isfinite(motion->intensity) ? clampf(motion->intensity, 0, 1) : 0;
     float direction = motion->direction < 0 ? -1 : 1;
+    if (motion->has_positions) {
+        base.x = motion->start_position.x + (motion->end_position.x - motion->start_position.x) * u;
+        base.y = motion->start_position.y + (motion->end_position.y - motion->start_position.y) * u;
+        base.z = motion->start_position.z + (motion->end_position.z - motion->start_position.z) * u;
+        base.x = clampf(base.x, -1, 1); base.y = clampf(base.y, -1, 1); base.z = clampf(base.z, -1, 1);
+        return base;
+    }
     float swing = sinf((float)(2 * M_PI) * u);
     float lift = sinf((float)M_PI * u); lift *= lift;
     switch (motion->type) {

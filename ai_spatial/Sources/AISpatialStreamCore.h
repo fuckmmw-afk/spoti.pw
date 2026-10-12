@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include "AISpatialScene.h"
 #include "AISpatialRenderers.h"
+#include "AISpatialEventExtraction.h"
 #define AS_STREAM_CAPACITY 262144u
 #define AS_STREAM_TELEMETRY 128u
 #define AS_STREAM_DELAY_SECONDS 2.75
@@ -21,6 +22,7 @@ typedef struct {
     uint64_t event_id, epoch, start_sample, end_sample;
     uint8_t stem, motion;
     float priority, intensity, direction;
+    float attack_seconds, release_seconds, tail_seconds;
 } ASStreamSpatialEvent;
 typedef struct {
     ASStreamSpatialEvent pending[AS_STREAM_SPATIAL_SLOTS];
@@ -31,6 +33,8 @@ typedef struct {
     _Atomic(uint64_t) scheduled, rejected, cancelled;
     _Atomic(int) enabled, route;
     _Atomic(uint32_t) intensity_bits, width_bits, depth_bits, center_bits, bass_bits, anti_phase_bits;
+    _Atomic(int) accent_motion, stereo_width, depth_enabled, reflections, hrtf;
+    _Atomic(unsigned) max_active;
 } ASStreamSpatialState;
 typedef struct {
     uint64_t epoch, start, end, input_frames, output_frames, stem_frames, fallback_frames;
@@ -69,6 +73,9 @@ bool ASStreamReadClock(const ASStreamCore *core, ASStreamClock *clock);
 void ASStreamSpatialConfigure(ASStreamCore *core, ASSpatialRoute route, bool enabled,
                               float intensity, float width, float depth, float center,
                               float bass, float anti_phase);
+void ASStreamSpatialSetComponents(ASStreamCore *core, bool accent_motion, bool stereo_width,
+                                  bool depth, bool reflections, bool hrtf);
+void ASStreamSpatialSetMaxActive(ASStreamCore *core, unsigned max_active);
 bool ASStreamSpatialSchedule(ASStreamCore *core, const ASStreamSpatialEvent *event);
 void ASStreamSpatialClear(ASStreamCore *core, uint64_t epoch);
 bool ASStreamInit(ASStreamCore *core);

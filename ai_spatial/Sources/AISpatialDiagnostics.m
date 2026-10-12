@@ -10,6 +10,7 @@ static const NSUInteger ASQueueEvents = 256, ASQueueBytes = 16 * 1024 * 1024;
 static const NSUInteger ASDebugLimit = 48 * 1024 * 1024, ASLogLimit = 8 * 1024 * 1024;
 #define ASCaptureRingCount 64u
 #define ASCaptureMaxRawFrames 4096u
+#define ASSpatialClipMaxFrames 240000u /* bounded five seconds at 48 kHz */
 typedef struct {
     uint64_t block_id, sample_start;
     double sample_time, host_time, sample_rate;
@@ -29,6 +30,27 @@ static _Atomic BOOL gCaptureDetailed;
 static _Atomic BOOL gCaptureRawEnabled;
 static _Atomic BOOL gCaptureHookAvailable;
 static _Atomic uint64_t gCaptureSampleCursor;
+static float gSpatialOriginalClip[2][ASSpatialClipMaxFrames];
+static float gSpatialProcessedClip[2][ASSpatialClipMaxFrames];
+static _Atomic uint32_t gSpatialClipCursor;
+static _Atomic uint32_t gSpatialClipRateBits;
+
+static void ASCaptureClipOriginal(const float *left, const float *right, UInt32 frames) {
+    if (!left || !right || !atomic_load_explicit(&gCaptureRawEnabled, memory_order_relaxed)) return;
+    uint32_t start=atomic_load_explicit(&gSpatialClipCursor,memory_order_relaxed);
+    if (start>=ASSpatialClipMaxFrames) return;
+    uint32_t count=MIN(frames,(UInt32)ASSpatialClipMaxFrames-start);
+    memcpy(gSpatialOriginalClip[0]+start,left,count*sizeof(float)); memcpy(gSpatialOriginalClip[1]+start,right,count*sizeof(float));
+    atomic_fetch_add_explicit(&gSpatialClipCursor,count,memory_order_release);
+}
+
+void AISpatialDiagnosticsCaptureSpatialPCM(const float *left, const float *right, UInt32 frames, double sampleRate) {
+    if (!left || !right || !frames || !atomic_load_explicit(&gCaptureRawEnabled,memory_order_relaxed)) return;
+    uint32_t end=atomic_load_explicit(&gSpatialClipCursor,memory_order_acquire), count=MIN(frames,end);
+    uint32_t start=end-count;
+    memcpy(gSpatialProcessedClip[0]+start,left+frames-count,count*sizeof(float)); memcpy(gSpatialProcessedClip[1]+start,right+frames-count,count*sizeof(float));
+    uint32_t bits=0; float r=(float)sampleRate; memcpy(&bits,&r,sizeof(bits)); atomic_store(&gSpatialClipRateBits,bits);
+}
 
 void AISpatialDiagnosticsSetRealtimeCaptureEnabled(BOOL enabled) {
     atomic_store_explicit(&gCaptureEnabled, enabled, memory_order_release);
@@ -102,6 +124,8 @@ void AISpatialDiagnosticsCapturePCM(const AudioBufferList *data, UInt32 frames,
         if (rawFrames) memcpy(gCaptureRaw[rawSlot][1], gCaptureRaw[rawSlot][0], rawFrames * sizeof(float));
     }
     if (rawFrames && (!data->mNumberBuffers || !data->mBuffers[0].mData)) record.raw_frames = 0;
+    if (collectRaw && data->mNumberBuffers >= 2 && data->mBuffers[0].mData && data->mBuffers[1].mData && isFloat && format->mBitsPerChannel==32)
+        ASCaptureClipOriginal((const float *)data->mBuffers[0].mData,(const float *)data->mBuffers[1].mData,frames);
     gCaptureRing[rawSlot] = record;
     atomic_store_explicit(&gCaptureHead, head + 1, memory_order_release);
 }
@@ -189,7 +213,7 @@ static NSString *ASCSV(id value) {
     return [NSString stringWithFormat:@"\"%@\"",[s stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
 }
 static NSArray *ASTimelineColumns(void) {
-    return @[@"session_id",@"second",@"start_time",@"end_time",@"samples",@"windows_submitted",@"windows_completed",@"input_rms",@"input_peak",@"vocal_rms",@"vocal_peak",@"instrumental_rms",@"instrumental_peak",@"mix_rms",@"mix_peak",@"reconstruction_error_rms",@"mixture_gain",@"input_to_vocal_db",@"input_to_mix_db",@"above_one",@"nan_count",@"infinity_count",@"inference_min_ms",@"inference_avg_ms",@"inference_max_ms",@"inference_p95_ms",@"queue_wait_avg_ms",@"queue_depth_max",@"dropped_buffers",@"memory_bytes",@"memory_measurement_time",@"errors",@"warnings", @"source", @"stream_epoch", @"playback_position_seconds", @"playback_position_evidence", @"windows_formed", @"skipped_windows", @"streaming_callback_blocks", @"streaming_callback_frames", @"duplicate_callback_blocks", @"input_buffer_frames", @"output_buffer_frames", @"additional_latency_seconds", @"additional_latency_evidence", @"stem_drift_samples", @"underrun_frames", @"overflow_blocks", @"fallback_transitions", @"fallback_frames_this_second", @"stem_frames_this_second", @"diagnostic_telemetry_dropped", @"thermal_state", @"temperature_celsius", @"stem_stats_scope", @"inference_scope"];
+    return @[@"session_id",@"second",@"start_time",@"end_time",@"samples",@"windows_submitted",@"windows_completed",@"input_rms",@"input_peak",@"vocal_rms",@"vocal_peak",@"instrumental_rms",@"instrumental_peak",@"mix_rms",@"mix_peak",@"reconstruction_error_rms",@"mixture_gain",@"input_to_vocal_db",@"input_to_mix_db",@"above_one",@"nan_count",@"infinity_count",@"inference_min_ms",@"inference_avg_ms",@"inference_max_ms",@"inference_p95_ms",@"queue_wait_avg_ms",@"queue_depth_max",@"dropped_buffers",@"memory_bytes",@"memory_measurement_time",@"errors",@"warnings", @"source", @"stream_epoch", @"playback_position_seconds", @"playback_position_evidence", @"windows_formed", @"skipped_windows", @"streaming_callback_blocks", @"streaming_callback_frames", @"duplicate_callback_blocks", @"input_buffer_frames", @"output_buffer_frames", @"additional_latency_seconds", @"additional_latency_evidence", @"stem_drift_samples", @"underrun_frames", @"overflow_blocks", @"fallback_transitions", @"fallback_frames_this_second", @"stem_frames_this_second", @"spatial_events_scheduled", @"spatial_events_applied", @"spatial_events_rejected", @"spatial_events_cancelled", @"spatial_renderer", @"diagnostic_telemetry_dropped", @"thermal_state", @"temperature_celsius", @"stem_stats_scope", @"inference_scope"];
 }
 static NSString *ASRoot(void) { NSString *base=NSSearchPathForDirectoriesInDomains(NSCachesDirectory,NSUserDomainMask,YES).firstObject ?: NSTemporaryDirectory(); return [base stringByAppendingPathComponent:@"Croma/AI Spatial/Diagnostics"]; }
 @interface AISpatialDiagnostics ()
@@ -270,6 +294,7 @@ void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NS
             BOOL hookAvailable = atomic_load_explicit(&gCaptureHookAvailable, memory_order_acquire);
             self->_metadata=[@{ @"schema_version": @1, @"session_id": session, @"started_at": ASUTC(), @"level": AISpatialDiagnosticsLevelName(level), @"source": automatic ? @"local_file" : @"pending", @"realtime_capture": @{ @"observer": @"AudioUnit post-render notification", @"enabled_only_while_recording": @YES, @"raw_pcm_dump": @"Full Trace only; bounded first five seconds; copied to a memory ring before asynchronous write", @"callback_hook_status": hookAvailable ? @"available" : @"unavailable; AudioOutputUnitStart import was not rebound" }, @"limits": @{ @"queue_events": @(ASQueueEvents), @"queue_bytes": @(ASQueueBytes), @"debug_bytes": @(ASDebugLimit), @"each_text_file_bytes": @(ASLogLimit), @"retained_sessions": @3, @"full_trace_max_wall_seconds": @90, @"test_audio_seconds": @30, @"dump_selection": @"first 5 seconds plus bounded anomaly neighborhood" }, @"evidence": @{ @"measured": @"PCM/tensor statistics, timestamps, call durations, checksums, task_info", @"derived": @"RMS, percentiles, residual errors, level ratios, relative time", @"configured": @"STFT, gains, thresholds, requested compute units", @"heuristic": @"all anomaly thresholds; warnings are not quality ground truth", @"unavailable": @"explicit reason accompanies unsupported metrics" } } mutableCopy];
             [self writeJSON:self->_metadata toURL:[dir URLByAppendingPathComponent:@"ai-spatial-metadata.json"]];
+            [self writeJSON:self->_metadata toURL:[dir URLByAppendingPathComponent:@"spatial-summary.json"]];
             NSString *header=[[ASTimelineColumns() componentsJoinedByString:@","] stringByAppendingString:@"\n"];
             [self append:[header dataUsingEncoding:NSUTF8StringEncoding] toURL:[dir URLByAppendingPathComponent:@"ai-spatial-timeline.csv"]];
             NSArray *children=[[NSFileManager defaultManager] contentsOfDirectoryAtURL:[NSURL fileURLWithPath:ASRoot()] includingPropertiesForKeys:@[NSURLCreationDateKey] options:0 error:nil];
@@ -278,6 +303,8 @@ void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NS
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((level==2 ? 90 : 120)*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ if([self.sessionID isEqual:session] && self.recording) [self stopRecording]; });
         _captureHasPrevious=NO; _lastCaptureSample=0; _lastCaptureBlock=0; _captureBaseSample=0; _captureSecondHasData=NO; _captureSecondSamples=0; _captureSecondRate=0; _captureSecondLeft=(ASMetrics){0}; _captureSecondRight=(ASMetrics){0};
+        atomic_store_explicit(&gSpatialClipCursor, 0, memory_order_release);
+        atomic_store_explicit(&gSpatialClipRateBits, 0, memory_order_release);
         AISpatialDiagnosticsSetRealtimeCaptureLevel(level);
         AISpatialDiagnosticsSetRealtimeCaptureEnabled(YES);
         _captureTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,_writer);
@@ -386,6 +413,7 @@ void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NS
         if(!json) { @synchronized(self) { self->_errors++; } return; }
         NSMutableData *line=[json mutableCopy]; [line appendData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];
         [self append:line toURL:[dir URLByAppendingPathComponent:@"ai-spatial-diagnostics.log"]];
+        [self append:line toURL:[dir URLByAppendingPathComponent:@"spatial-diagnostics.log"]];
     }];
 }
 - (void)recordWindow:(NSDictionary *)fields processed:(BOOL)processed {
@@ -400,6 +428,7 @@ void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NS
         for(NSString *key in ASTimelineColumns()) [columns addObject:ASCSV(row[key])];
         NSData *data=[[[columns componentsJoinedByString:@","] stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
         [self append:data toURL:[dir URLByAppendingPathComponent:@"ai-spatial-timeline.csv"]];
+        [self append:data toURL:[dir URLByAppendingPathComponent:@"spatial-timeline.csv"]];
     }];
     [self recordStage:@"Stage 10 - Final PCM / Export" event:@"second_summary" fields:fields];
 }
@@ -440,6 +469,25 @@ void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NS
 - (void)updateMetadata:(NSDictionary *)metadata {
     NSDictionary *copy=[metadata copy]; [self enqueueBytes:4096 work:^(NSURL *dir,NSString *session) { [self->_metadata addEntriesFromDictionary:copy]; [self writeJSON:self->_metadata toURL:[dir URLByAppendingPathComponent:@"ai-spatial-metadata.json"]]; }];
 }
+static NSData *ASSpatialWAV(const float *left, const float *right, NSUInteger frames, double rate) {
+    if (!left || !right || !frames || rate <= 0) return nil;
+    NSUInteger payload=frames*2*sizeof(float); NSMutableData *data=[NSMutableData dataWithLength:44+payload];
+    uint8_t *p=data.mutableBytes; memcpy(p,"RIFF",4); uint32_t riff=(uint32_t)(36+payload); memcpy(p+4,&riff,4); memcpy(p+8,"WAVEfmt ",8);
+    uint32_t fmtSize=16; uint16_t format=3, channels=2, bits=32, block=8; uint32_t hz=(uint32_t)llround(rate), bytesPerSec=hz*block;
+    memcpy(p+16,&fmtSize,4); memcpy(p+20,&format,2); memcpy(p+22,&channels,2); memcpy(p+24,&hz,4); memcpy(p+28,&bytesPerSec,4); memcpy(p+32,&block,2); memcpy(p+34,&bits,2); memcpy(p+36,"data",4); uint32_t size=(uint32_t)payload; memcpy(p+40,&size,4);
+    float *samples=(float *)(p+44); for(NSUInteger i=0;i<frames;i++){samples[i*2]=left[i];samples[i*2+1]=right[i];} return data;
+}
+- (void)writeSpatialClipsToDirectory:(NSURL *)dir {
+    if (self.level != AISpatialDiagnosticsLevelFullTrace) return;
+    NSUInteger frames=MIN((NSUInteger)atomic_load_explicit(&gSpatialClipCursor,memory_order_acquire),(NSUInteger)ASSpatialClipMaxFrames); if (!frames) return;
+    uint32_t bits=atomic_load_explicit(&gSpatialClipRateBits,memory_order_acquire); float ratef=0; memcpy(&ratef,&bits,sizeof(ratef)); if (ratef<=0) ratef=48000;
+    NSURL *clips=[dir URLByAppendingPathComponent:@"spatial-clips" isDirectory:YES]; [[NSFileManager defaultManager] createDirectoryAtURL:clips withIntermediateDirectories:YES attributes:nil error:nil];
+    NSData *original=ASSpatialWAV(gSpatialOriginalClip[0],gSpatialOriginalClip[1],frames,ratef), *spatial=ASSpatialWAV(gSpatialProcessedClip[0],gSpatialProcessedClip[1],frames,ratef);
+    if (!original || !spatial) return;
+    NSMutableData *difference=[NSMutableData dataWithLength:frames*2*sizeof(float)]; float *d=difference.mutableBytes; for(NSUInteger i=0;i<frames;i++){d[i*2]=gSpatialProcessedClip[0][i]-gSpatialOriginalClip[0][i];d[i*2+1]=gSpatialProcessedClip[1][i]-gSpatialOriginalClip[1][i];}
+    NSData *foreground=difference;
+    [original writeToURL:[clips URLByAppendingPathComponent:@"Original.wav"] options:NSDataWritingAtomic error:nil]; [spatial writeToURL:[clips URLByAppendingPathComponent:@"Spatial.wav"] options:NSDataWritingAtomic error:nil]; [difference writeToURL:[clips URLByAppendingPathComponent:@"Difference.wav"] options:NSDataWritingAtomic error:nil]; [foreground writeToURL:[clips URLByAppendingPathComponent:@"Event-Foreground.wav"] options:NSDataWritingAtomic error:nil];
+}
 - (void)finishTestWithMetadata:(NSDictionary *)metadata {
     [self updateMetadata:metadata]; [self recordStage:@"Stage 10 - Final PCM / Export" event:@"test_complete" fields:metadata];
     @synchronized(self) { _finished=YES; _state=@"Test complete"; }
@@ -461,9 +509,13 @@ void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NS
         // Reports contain no paths, user file names, PCM, tokens or tensor values.
         NSDictionary *snapshot=[self snapshot]; self->_metadata[@"counters"]=snapshot;
         [self writeJSON:self->_metadata toURL:[dir URLByAppendingPathComponent:@"ai-spatial-metadata.json"]];
-        for(NSString *name in @[@"ai-spatial-diagnostics.log",@"ai-spatial-timeline.csv",@"ai-spatial-metadata.json",@"accent-events.jsonl",@"accent-events.csv"]) {
+        [self writeJSON:self->_metadata toURL:[dir URLByAppendingPathComponent:@"spatial-summary.json"]];
+        [self writeSpatialClipsToDirectory:dir];
+        for(NSString *name in @[@"ai-spatial-diagnostics.log",@"spatial-diagnostics.log",@"ai-spatial-timeline.csv",@"spatial-timeline.csv",@"ai-spatial-metadata.json",@"spatial-summary.json",@"accent-events.jsonl",@"spatial-events.jsonl",@"accent-events.csv"]) {
             NSURL *url=[dir URLByAppendingPathComponent:name]; if([[NSFileManager defaultManager] fileExistsAtPath:url.path]) [files addObject:url];
         }
+        NSURL *clips=[dir URLByAppendingPathComponent:@"spatial-clips" isDirectory:YES];
+        for (NSURL *url in [[NSFileManager defaultManager] contentsOfDirectoryAtURL:clips includingPropertiesForKeys:nil options:0 error:nil]) if ([[NSFileManager defaultManager] fileExistsAtPath:url.path]) [files addObject:url];
         if(debug) {
             NSMutableArray *paths=[NSMutableArray array], *names=[NSMutableArray array];
             for(NSURL *url in files) { [paths addObject:url]; [names addObject:url.lastPathComponent]; }

@@ -60,6 +60,7 @@ static NSString *ASAccentDocumentsDirectory(void) {
 }
 
 static NSString *ASAccentSessionID(void) {
+    if ([NSUserDefaults.standardUserDefaults boolForKey:ASConfigDeterministic]) return @"deterministic-session";
     return [NSUUID UUID].UUIDString.lowercaseString;
 }
 
@@ -254,8 +255,10 @@ static NSString *ASAccentSessionID(void) {
         if (!validClock || !streamClockValid) { selected = NO; reason = "invalid_timeline_snapshot"; }
         if (selected) {
             ASEventKey key = {epoch, windowID, event.start_sample, event.end_sample, event.source};
+            NSUInteger configuredDensity = (NSUInteger)llround([NSUserDefaults.standardUserDefaults doubleForKey:ASConfigAccentRate]);
+            configuredDensity = MIN(MAX(configuredDensity, 1), 10);
             ASEventDecision gate = ASEventGateSelect(&_eventGate, key, clock.epoch, clock.reset_pending,
-                clock.input_cursor, clock.output_cursor, latency, safety, finished, 10, (uint64_t)llround(rate * .35));
+                clock.input_cursor, clock.output_cursor, latency, safety, finished, (unsigned)configuredDensity, (uint64_t)llround(rate * .35));
             if (gate != AS_EVENT_ACCEPT) { selected = NO; reason = ASEventDecisionName(gate); }
         }
         NSString *decision = selected ? @"selected" : @"rejected";
@@ -300,7 +303,7 @@ static NSString *ASAccentSessionID(void) {
         [NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
         NSString *jsonPath = [directory stringByAppendingPathComponent:@"accent-events.jsonl"];
         NSData *json = [NSJSONSerialization dataWithJSONObject:copy options:0 error:nil];
-        if (json) { NSMutableData *line = [json mutableCopy]; [line appendData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]]; NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:jsonPath]; if (!handle) { [line writeToFile:jsonPath atomically:YES]; } else { [handle seekToEndOfFile]; [handle writeData:line]; [handle closeFile]; } }
+        if (json) { NSMutableData *line = [json mutableCopy]; [line appendData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]]; for (NSString *name in @[jsonPath, [directory stringByAppendingPathComponent:@"spatial-events.jsonl"]]) { NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:name]; if (!handle) { [line writeToFile:name atomically:YES]; } else { [handle seekToEndOfFile]; [handle writeData:line]; [handle closeFile]; } } }
         NSString *csvPath = [directory stringByAppendingPathComponent:@"accent-events.csv"];
         if (![NSFileManager.defaultManager fileExistsAtPath:csvPath]) [@"event_id,session_id,stream_epoch,sample_rate_hz,source,type,start_sample,end_sample,start_time_seconds,end_time_seconds,confidence,expressiveness,priority,decision,reason,deadline_sample,deadline_status\n" writeToFile:csvPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         NSString *(^q)(id) = ^NSString *(id value) { NSString *s = [value description] ?: @""; return [NSString stringWithFormat:@"\"%@\"", [s stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]]; };

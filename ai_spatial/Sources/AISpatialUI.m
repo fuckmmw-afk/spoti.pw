@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import "AISpatialModelStore.h"
 #import "AISpatialSeparator.h"
 #import "AISpatialLog.h"
@@ -18,6 +19,8 @@ static const void *kAISpatialPageMarker = &kAISpatialPageMarker;
 static const void *kAISpatialActionTarget = &kAISpatialActionTarget;
 static const void *kAISpatialFooterMarker = &kAISpatialFooterMarker;
 static const void *kAISpatialActivationSwitch = &kAISpatialActivationSwitch;
+static const void *kASUIAssociatedKey = &kASUIAssociatedKey;
+static const void *kASUIPreset = &kASUIPreset;
 
 @interface AISpatialDiagnosticsViewController : UIViewController
 @property(nonatomic,strong) UISegmentedControl *levelControl;
@@ -33,7 +36,63 @@ static const void *kAISpatialActivationSwitch = &kAISpatialActivationSwitch;
 @property(nonatomic,strong) NSTimer *refreshTimer;
 @end
 
+@interface AISpatialEngineControlsViewController : UIViewController
+@property(nonatomic,strong) UISegmentedControl *modeControl;
+@property(nonatomic,strong) UISegmentedControl *routeControl;
+@property(nonatomic,strong) UILabel *statusLabel;
+@end
+
 static const void *kAISpatialAccentEventID = &kAISpatialAccentEventID;
+
+static NSString *const kASUIEngine = @"spotifyglass.ai-spatial.engine-enabled";
+static NSString *const kASUIMode = @"spotifyglass.ai-spatial.mode";
+static NSString *const kASUIIntensity = @"spotifyglass.ai-spatial.intensity";
+static NSString *const kASUIWidth = @"spotifyglass.ai-spatial.width";
+static NSString *const kASUIDepth = @"spotifyglass.ai-spatial.depth";
+static NSString *const kASUIAccentDensity = @"spotifyglass.ai-spatial.accent-rate";
+static NSString *const kASUIRoute = @"spotifyglass.ai-spatial.route";
+static NSString *const kASUIAccentMotion = @"spotifyglass.ai-spatial.accent-motion";
+static NSString *const kASUIWidthEnabled = @"spotifyglass.ai-spatial.stereo-width-enabled";
+static NSString *const kASUIDepthEnabled = @"spotifyglass.ai-spatial.depth-enabled";
+static NSString *const kASUIReflections = @"spotifyglass.ai-spatial.reflections-enabled";
+static NSString *const kASUIHRTF = @"spotifyglass.ai-spatial.hrtf-enabled";
+static NSString *const kASUIDeterministic = @"spotifyglass.ai-spatial.deterministic";
+
+static void ASUIRefreshSpatial(void) {
+    void (*refresh)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "AISpatialLiveRefreshConfiguration");
+    if (refresh) refresh();
+}
+
+@implementation AISpatialEngineControlsViewController
+- (UISwitch *)switchForKey:(NSString *)key title:(NSString *)title stack:(UIStackView *)stack {
+    UILabel *label=[UILabel new]; label.text=title; label.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody]; UISwitch *toggle=[UISwitch new]; toggle.on=[NSUserDefaults.standardUserDefaults boolForKey:key]; toggle.accessibilityLabel=title; objc_setAssociatedObject(toggle, kASUIAssociatedKey, key, OBJC_ASSOCIATION_COPY_NONATOMIC); [toggle addTarget:self action:@selector(componentChanged:) forControlEvents:UIControlEventValueChanged]; UIStackView *row=[[UIStackView alloc] initWithArrangedSubviews:@[label,toggle]]; row.axis=UILayoutConstraintAxisHorizontal; row.alignment=UIStackViewAlignmentCenter; row.distribution=UIStackViewDistributionEqualSpacing; [stack addArrangedSubview:row]; return toggle;
+}
+- (UISlider *)slider:(NSString *)title key:(NSString *)key min:(float)min max:(float)max stack:(UIStackView *)stack {
+    UILabel *label=[UILabel new]; label.text=title; label.font=[UIFont preferredFontForTextStyle:UIFontTextStyleBody]; UISlider *slider=[UISlider new]; slider.minimumValue=min; slider.maximumValue=max; slider.value=[NSUserDefaults.standardUserDefaults doubleForKey:key]; slider.accessibilityLabel=title; objc_setAssociatedObject(slider, kASUIAssociatedKey, key, OBJC_ASSOCIATION_COPY_NONATOMIC); [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged]; UIStackView *row=[[UIStackView alloc] initWithArrangedSubviews:@[label,slider]]; row.axis=UILayoutConstraintAxisVertical; row.spacing=2; [stack addArrangedSubview:row]; return slider;
+}
+- (void)viewDidLoad {
+    [super viewDidLoad]; self.title=@"Spatial Engine"; self.view.backgroundColor=UIColor.systemBackgroundColor; self.navigationItem.leftBarButtonItem=[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(close:)];
+    UIScrollView *scroll=[UIScrollView new]; scroll.translatesAutoresizingMaskIntoConstraints=NO; UIStackView *stack=[[UIStackView alloc] initWithFrame:CGRectZero]; stack.axis=UILayoutConstraintAxisVertical; stack.spacing=10; stack.translatesAutoresizingMaskIntoConstraints=NO; [scroll addSubview:stack]; [self.view addSubview:scroll]; UILayoutGuide *g=self.view.safeAreaLayoutGuide; [NSLayoutConstraint activateConstraints:@[[scroll.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:20],[scroll.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-20],[scroll.topAnchor constraintEqualToAnchor:g.topAnchor constant:12],[scroll.bottomAnchor constraintEqualToAnchor:g.bottomAnchor],[stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],[stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor],[stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],[stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor],[stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor]]];
+    UILabel *intro=[UILabel new]; intro.numberOfLines=0; intro.textColor=UIColor.secondaryLabelColor; intro.text=@"Selective foreground motion runs locally before the existing JamesDSP path. Original and Shadow are safe starting points."; [stack addArrangedSubview:intro];
+    self.statusLabel=[UILabel new]; self.statusLabel.numberOfLines=0; self.statusLabel.font=[UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular]; [stack addArrangedSubview:self.statusLabel];
+    UISwitch *engine=[self switchForKey:kASUIEngine title:@"Spatial Engine" stack:stack]; [engine addTarget:self action:@selector(engineChanged:) forControlEvents:UIControlEventValueChanged];
+    UILabel *modeLabel=[UILabel new]; modeLabel.text=@"Mode"; [stack addArrangedSubview:modeLabel]; self.modeControl=[[UISegmentedControl alloc] initWithItems:@[@"Original",@"Shadow",@"Live",@"Diagnostic"]]; self.modeControl.selectedSegmentIndex=MIN(MAX([NSUserDefaults.standardUserDefaults integerForKey:kASUIMode],0),3); [self.modeControl addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged]; [stack addArrangedSubview:self.modeControl];
+    UILabel *routeLabel=[UILabel new]; routeLabel.text=@"Output Profile"; [stack addArrangedSubview:routeLabel]; self.routeControl=[[UISegmentedControl alloc] initWithItems:@[@"Headphones",@"Speakers",@"Universal",@"Mono"]]; self.routeControl.selectedSegmentIndex=MIN(MAX([NSUserDefaults.standardUserDefaults integerForKey:kASUIRoute],0),3); [self.routeControl addTarget:self action:@selector(routeChanged:) forControlEvents:UIControlEventValueChanged]; [stack addArrangedSubview:self.routeControl];
+    [self slider:@"Intensity" key:kASUIIntensity min:0 max:1 stack:stack]; [self slider:@"Stereo Width" key:kASUIWidth min:0 max:1 stack:stack]; [self slider:@"Depth" key:kASUIDepth min:0 max:1 stack:stack]; [self slider:@"Accent Density" key:kASUIAccentDensity min:1 max:10 stack:stack];
+    [self switchForKey:kASUIAccentMotion title:@"Accent Motion" stack:stack]; [self switchForKey:kASUIWidthEnabled title:@"Stereo Width Enabled" stack:stack]; [self switchForKey:kASUIDepthEnabled title:@"Depth Enabled" stack:stack]; [self switchForKey:kASUIReflections title:@"Reflections" stack:stack]; [self switchForKey:kASUIHRTF title:@"HRTF" stack:stack]; [self switchForKey:kASUIDeterministic title:@"Deterministic Test Mode" stack:stack];
+    UILabel *presetTitle=[UILabel new]; presetTitle.text=@"Presets"; [stack addArrangedSubview:presetTitle]; for (NSArray *preset in @[@[@"Extra Wide 3D",@"0.9",@"0.95",@"0.55"],@[@"Natural Spatial",@"0.5",@"0.55",@"0.35"],@[@"Dynamic Accents",@"0.7",@"0.7",@"0.45"],@[@"Headphones 3D",@"0.75",@"0.85",@"0.65"],@[@"Speakers Wide",@"0.55",@"0.55",@"0.35"],@[@"Universal Safe",@"0.3",@"0.35",@"0.2"]]) { UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem]; [b setTitle:preset[0] forState:UIControlStateNormal]; b.contentHorizontalAlignment=UIControlContentHorizontalAlignmentLeading; objc_setAssociatedObject(b, &kASUIPreset, preset, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [b addTarget:self action:@selector(presetChanged:) forControlEvents:UIControlEventTouchUpInside]; [stack addArrangedSubview:b]; }
+    [self updateStatus];
+}
+- (void)close:(id)sender { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)updateStatus { NSDictionary *s=AISpatialLiveStatusSnapshot(); self.statusLabel.text=[NSString stringWithFormat:@"%@\nRenderer: %@\nEpoch: %@\nApplied events: %@\nFallbacks: %@",s[@"mode_name"]?:@"Original",s[@"spatial_route"]?:@"unknown",s[@"stream_epoch"]?:@"none",s[@"spatial_applied"]?:@0,s[@"fallbacks"]?:@0]; }
+- (void)engineChanged:(UISwitch *)sender { [NSUserDefaults.standardUserDefaults setBool:sender.isOn forKey:kASUIEngine]; if(!sender.isOn){[NSUserDefaults.standardUserDefaults setInteger:0 forKey:kASUIMode]; AISpatialLiveSetMode(AISpatialLiveModeOriginal);} ASUIRefreshSpatial(); [self updateStatus]; }
+- (void)modeChanged:(UISegmentedControl *)sender { NSInteger mode=sender.selectedSegmentIndex; [NSUserDefaults.standardUserDefaults setInteger:mode forKey:kASUIMode]; [NSUserDefaults.standardUserDefaults setBool:mode!=0 forKey:kASUIEngine]; if(mode==3) mode=1; if(mode!=AISpatialLiveModeOriginal && !AISpatialModelStore.sharedStore.modelIsReady){sender.selectedSegmentIndex=0; [self showMessage:@"Download and verify the model first."]; return;} AISpatialLiveSetMode((AISpatialLiveMode)mode); ASUIRefreshSpatial(); [self updateStatus]; }
+- (void)routeChanged:(UISegmentedControl *)sender { [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:kASUIRoute]; ASUIRefreshSpatial(); }
+- (void)componentChanged:(UISwitch *)sender { NSString *key=objc_getAssociatedObject(sender, kASUIAssociatedKey); if(key) [NSUserDefaults.standardUserDefaults setBool:sender.isOn forKey:key]; ASUIRefreshSpatial(); }
+- (void)sliderChanged:(UISlider *)sender { NSString *key=objc_getAssociatedObject(sender, kASUIAssociatedKey); if(key) [NSUserDefaults.standardUserDefaults setDouble:sender.value forKey:key]; ASUIRefreshSpatial(); }
+- (void)presetChanged:(UIButton *)sender { NSArray *p=objc_getAssociatedObject(sender,&kASUIPreset); if(p.count>=4){[NSUserDefaults.standardUserDefaults setDouble:[p[1] doubleValue] forKey:kASUIIntensity];[NSUserDefaults.standardUserDefaults setDouble:[p[2] doubleValue] forKey:kASUIWidth];[NSUserDefaults.standardUserDefaults setDouble:[p[3] doubleValue] forKey:kASUIDepth];} ASUIRefreshSpatial(); [self updateStatus]; }
+- (void)showMessage:(NSString *)message { UIAlertController *a=[UIAlertController alertControllerWithTitle:@"AI Spatial" message:message preferredStyle:UIAlertControllerStyleAlert]; [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]]; [self presentViewController:a animated:YES completion:nil]; }
+@end
 
 @implementation AISpatialAccentViewController
 
@@ -235,9 +294,17 @@ static NSString *AISpatialDisplayStatus(void) {
 
 @interface AISpatialActionTarget ()
 - (void)showMessage:(NSString *)message;
+- (void)openControls:(id)sender;
 @end
 
 @implementation AISpatialActionTarget
+
+- (void)openControls:(id)sender {
+    UIViewController *page=self.page; if (!page) return;
+    UINavigationController *navigation=[[UINavigationController alloc] initWithRootViewController:[AISpatialEngineControlsViewController new]];
+    navigation.modalPresentationStyle=UIModalPresentationPageSheet;
+    [page presentViewController:navigation animated:YES completion:nil];
+}
 
 - (void)download:(id)sender {
     AISpatialModelStore *store = AISpatialModelStore.sharedStore;
@@ -473,6 +540,23 @@ static void AISpatialRewriteText(UIViewController *page) {
     });
 }
 
+/* The standalone spatial dylib is also shipped without rebuilding the full
+ * Chroma settings tweak. In that installation path the existing root row is
+ * still called “Sing”. Rename only that exact settings label so the feature is
+ * discoverable; the row's original navigation/action remains intact and the
+ * destination is upgraded by AISpatialRefreshPage below. */
+static void AISpatialRewriteRootMenu(UIViewController *controller) {
+    if (!controller || AISpatialLooksLikeSingPage(controller)) return;
+    AISpatialWalk(controller.view, ^(UIView *view) {
+        if (![view isKindOfClass:UILabel.class]) return;
+        UILabel *label=(UILabel *)view;
+        if (AISpatialEquals(label.text, @"Sing")) {
+            label.text=@"AI Spatial Engine";
+            label.accessibilityLabel=@"AI Spatial Engine";
+        }
+    });
+}
+
 static void AISpatialUpdateModelCell(UIViewController *page) {
     NSString *status = AISpatialDisplayStatus();
     AISpatialWalk(page.view, ^(UIView *view) {
@@ -516,6 +600,7 @@ static void AISpatialInstallFooter(UIViewController *page) {
             AISpatialFooterButton(@"Open model page", target, @selector(openModelPage:), CGRectZero),
             AISpatialFooterButton(@"Test first 30 seconds", target, @selector(testSeparation:), CGRectZero),
             AISpatialFooterButton(@"Select Original / Shadow / Live mode", target, @selector(selectLiveMode:), CGRectZero),
+            AISpatialFooterButton(@"Spatial Engine settings", target, @selector(openControls:), CGRectZero),
             AISpatialFooterButton(@"Diagnostics", target, @selector(openDiagnostics:), CGRectZero),
             AISpatialFooterButton(@"Accent Detector", target, @selector(openAccentDetector:), CGRectZero),
             AISpatialFooterButton(@"Export diagnostics", target, @selector(exportLogs:), CGRectZero),
@@ -538,7 +623,7 @@ static void AISpatialInstallFooter(UIViewController *page) {
     if (objc_getAssociatedObject(table, kAISpatialFooterMarker)) return;
     UIView *oldFooter = table.tableFooterView;
     CGFloat oldHeight = oldFooter ? MAX(CGRectGetHeight(oldFooter.bounds), 1.0) : 0.0;
-    CGFloat extraHeight = 7.0 * 50.0 + 12.0;
+    CGFloat extraHeight = 8.0 * 50.0 + 12.0;
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, table.bounds.size.width, oldHeight + extraHeight)];
     footer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     if (oldFooter) {
@@ -553,6 +638,7 @@ static void AISpatialInstallFooter(UIViewController *page) {
     [footer addSubview:AISpatialFooterButton(@"Open model page", target, @selector(openModelPage:), CGRectMake(20, y, width, 44))]; y += 50.0;
     [footer addSubview:AISpatialFooterButton(@"Test first 30 seconds", target, @selector(testSeparation:), CGRectMake(20, y, width, 44))]; y += 50.0;
     [footer addSubview:AISpatialFooterButton(@"Select Original / Shadow / Live mode", target, @selector(selectLiveMode:), CGRectMake(20, y, width, 44))]; y += 50.0;
+    [footer addSubview:AISpatialFooterButton(@"Spatial Engine settings", target, @selector(openControls:), CGRectMake(20, y, width, 44))]; y += 50.0;
     [footer addSubview:AISpatialFooterButton(@"Diagnostics", target, @selector(openDiagnostics:), CGRectMake(20, y, width, 44))]; y += 50.0;
     [footer addSubview:AISpatialFooterButton(@"Accent Detector", target, @selector(openAccentDetector:), CGRectMake(20, y, width, 44))]; y += 50.0;
     [footer addSubview:AISpatialFooterButton(@"Export diagnostics", target, @selector(exportLogs:), CGRectMake(20, y, width, 44))]; y += 50.0;
@@ -592,6 +678,7 @@ static void AISpatialViewDidAppear(id self, SEL selector, BOOL animated) {
 static void AISpatialViewDidLayoutSubviews(id self, SEL selector) {
     if (gOriginalViewDidLayoutSubviews) ((void (*)(id, SEL))gOriginalViewDidLayoutSubviews)(self, selector);
     UIViewController *controller = (UIViewController *)self;
+    AISpatialRewriteRootMenu(controller);
     if (controller == gActivePage || objc_getAssociatedObject(controller, kAISpatialPageMarker) ||
         AISpatialEquals(controller.navigationItem.title, @"Sing") || AISpatialEquals(controller.navigationItem.title, @"AI Spatial")) {
         AISpatialRefreshPage(controller);

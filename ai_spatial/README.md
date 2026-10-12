@@ -1,9 +1,11 @@
 # AI Spatial add-on
 
-Stage 04 **build A — Timing & Spatial Core** fixes clock-domain accounting,
-start deadlines, a shared rolling event-density limit, and stale/duplicate
-event gating. It introduces the independent C spatial scene and synthetic tests.
-Spatial Live is compile-gated until E; the croma UI migration is gated until F.
+Stage 04 **builds B–F** add deterministic event extraction with attack/release
+envelopes, six bounded motion types, headphone binaural, speaker, universal
+stereo and mono-safe renderers, route/profile selection, selective foreground
+delta mixing, live integration, and the unified croma settings page. Build A's
+clock accounting, deadlines and stale/duplicate event gating remain the timing
+foundation.
 See [Stage 04 build notes](../deliverable/AI-Spatial-Stage04.md).
 
 Build A keeps the existing Stage 03 UI and the Separator/JamesDSP audio path.
@@ -27,6 +29,9 @@ Normal report export produces:
 - `ai-spatial-diagnostics.log` — JSON-line stage events with human-readable fields;
 - `ai-spatial-timeline.csv` — one row per second, including RMS/peak, stem levels, reconstruction error, window counts, inference min/average/max/p95, queue and memory measurements;
 - `ai-spatial-metadata.json` — session, model revision and manifest hashes, Core ML contract, STFT settings, PCM format, limits, counters and explicit unavailable reasons.
+- The export also includes the requested stable names `spatial-diagnostics.log`, `spatial-events.jsonl`, `spatial-summary.json`, and `spatial-timeline.csv`.
+- Full Trace additionally exports bounded local `spatial-clips/Original.wav`,
+  `Spatial.wav`, `Difference.wav`, and `Event-Foreground.wav` A/B clips.
 
 The optional **Export Full Trace debug ZIP** contains only the selected `.bin`/`.wav`/sidecar files and the reports. It does not include the original filename, Spotify tokens or credentials. Full Trace may retain the first five seconds of Spotify PCM as a canonical float32 copy: the callback only copies into a preallocated bounded memory ring, and the writer persists it asynchronously. Basic and Detailed levels remain metrics-only for live Spotify audio. The offline test can retain selected PCM, output WAVs and tensor windows under Full Trace.
 

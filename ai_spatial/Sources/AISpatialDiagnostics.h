@@ -21,6 +21,8 @@ FOUNDATION_EXPORT void AISpatialDiagnosticsSetRealtimeCaptureHookAvailable(BOOL 
 FOUNDATION_EXPORT void AISpatialDiagnosticsCapturePCM(const AudioBufferList *data, UInt32 frames,
                                                        const AudioStreamBasicDescription *format,
                                                        const AudioTimeStamp *timestamp);
+FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureSpatialPCM(const float *left, const float *right,
+                                                              UInt32 frames, double sampleRate);
 FOUNDATION_EXPORT NSDictionary *AISpatialDiagnosticsStatusSnapshot(void);
 FOUNDATION_EXPORT void AISpatialDiagnosticsStart(void);
 FOUNDATION_EXPORT void AISpatialDiagnosticsStop(void);

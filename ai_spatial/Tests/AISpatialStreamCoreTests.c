@@ -63,10 +63,11 @@ static void test_mode_transition_and_synchronised_fallback(void) {
         written += n; position += n;
     }
     assert(atomic_load(&core.active_mode) == 2);
-    /* Preroll is explicit silence; after the five millisecond startup ramp the
-       fallback reads exactly the delayed source sample from the same epoch. */
-    assert(fabsf(observed[delay - 1]) < 1e-6f);
-    size_t check = delay + 44100 / 100 + 100;
+    /* Preroll must remain audible while the worker catches up. */
+    size_t startupSource = 512 + delay - 1;
+    float startupExpected = 0.15f + (float)(startupSource % 1000) * 0.0001f;
+    assert(fabsf(observed[delay - 1] - startupExpected) < 1e-6f);
+    size_t check = delay + 44100 / 20 + 100;
     size_t source = 512 + check - delay;
     float expectedL = 0.15f + (float)((source % 1000)) * 0.0001f;
     float expectedR = -0.10f + (float)((source % 700)) * 0.0001f;

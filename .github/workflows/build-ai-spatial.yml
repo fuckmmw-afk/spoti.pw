@@ -6,7 +6,7 @@ on:
       phase:
         description: "Build milestone: A=1 B=2 C=3 D=4 E=5 F=6 G=7"
         required: true
-        default: "1"
+        default: "6"
         type: choice
         options: ["1", "2", "3", "4", "5", "6", "7"]
   push:
@@ -30,7 +30,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      SPATIAL_PHASE: ${{ inputs.phase || '1' }}
+      SPATIAL_PHASE: ${{ inputs.phase || '6' }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4

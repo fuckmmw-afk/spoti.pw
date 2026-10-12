@@ -1,4 +1,5 @@
 #include "AISpatialScene.h"
+#include "AISpatialRenderers.h"
 #include "AISpatialEventTiming.h"
 #include <assert.h>
 #include <math.h>
@@ -45,6 +46,18 @@ static void clocks_test(void) {
     assert(ASEventReadyDeadline(0,2750,100)==2650);
     assert(ASEventReadyDeadline(UINT64_MAX-10,100,5)==UINT64_MAX-5);
 }
+static void renderer_test(void) {
+    float l=0,r=0; ASSpatialRenderConfig cfg;
+    ASSpatialRenderConfigDefault(&cfg, ASSpatialRouteMonoSafe);
+    ASSpatialRenderStereo(&cfg,(ASSpatialPosition){.8f,0,0},.4f,-.2f,1,&l,&r);
+    assert(fabsf(l-r) < .25f); /* mono-safe remains correlated */
+    cfg.route=ASSpatialRouteSpeakers; cfg.intensity=0;
+    ASSpatialRenderStereo(&cfg,(ASSpatialPosition){1,0,0},.4f,-.2f,1,&l,&r);
+    assert(l==.4f && r==-.2f); /* zero intensity is exact identity */
+    ASSpatialHRTFState h; ASSpatialHRTFReset(&h);
+    ASSpatialHRTFProcess(&h,.4f,.4f,.8f,.5f,1,&l,&r);
+    assert(isfinite(l) && isfinite(r) && fabsf(l)<=1 && fabsf(r)<=1);
+}
 static void scheduler_test(double rate) {
     ASEventGate g; ASEventGateInit(&g); ASEventGateSetEpoch(&g,2);
     uint64_t delay=(uint64_t)llround(2.75*rate), safety=(uint64_t)llround(.1*rate);
@@ -86,6 +99,6 @@ static void rolling_density_test(void) {
     assert(ASEventGateSelect(&g,key,2,false,0,0,100000,0,160.1,10,0)==AS_EVENT_DENSITY);
 }
 int main(void) {
-    scene_test(); clocks_test(); scheduler_test(44100); scheduler_test(48000); rolling_density_test();
+    scene_test(); clocks_test(); renderer_test(); scheduler_test(44100); scheduler_test(48000); rolling_density_test();
     puts("AISpatialSpatialCoreTests: OK (scene, smooth motion, envelopes, clocks, deadlines, epoch, duplicates, rolling density)");
 }

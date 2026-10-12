@@ -19,6 +19,13 @@ NSString *const ASConfigRoute = @"spotifyglass.ai-spatial.route";
 NSString *const ASConfigRouteAuto = @"spotifyglass.ai-spatial.route-auto";
 NSString *const ASConfigProfile = @"spotifyglass.ai-spatial.profile";
 NSString *const ASConfigDiagnosticsLevel = @"spotifyglass.ai-spatial.diagnostics-level";
+NSString *const ASConfigAccentMotion = @"spotifyglass.ai-spatial.accent-motion";
+NSString *const ASConfigStereoWidthEnabled = @"spotifyglass.ai-spatial.stereo-width-enabled";
+NSString *const ASConfigDepthEnabled = @"spotifyglass.ai-spatial.depth-enabled";
+NSString *const ASConfigReflectionsEnabled = @"spotifyglass.ai-spatial.reflections-enabled";
+NSString *const ASConfigHRTFEnabled = @"spotifyglass.ai-spatial.hrtf-enabled";
+NSString *const ASConfigMotionVariety = @"spotifyglass.ai-spatial.motion-variety";
+NSString *const ASConfigDeterministic = @"spotifyglass.ai-spatial.deterministic";
 
 static void __attribute__((unused)) migrate(NSString *from, NSString *to) {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -41,7 +48,10 @@ void ASConfigMigrateAndRegister(void) {
         ASConfigMaxActiveSources: @3, ASConfigCenterProtection: @0.75,
         ASConfigBassProtection: @0.70, ASConfigAntiPhaseLimit: @0.08,
         ASConfigRoute: @2, ASConfigRouteAuto: @YES, ASConfigProfile: @5, ASConfigDiagnosticsLevel: @0,
-        @"spotifyglass.ai-spatial.accent-enabled": @YES
+        @"spotifyglass.ai-spatial.accent-enabled": @YES,
+        ASConfigAccentMotion: @YES, ASConfigStereoWidthEnabled: @YES, ASConfigDepthEnabled: @YES,
+        ASConfigReflectionsEnabled: @YES, ASConfigHRTFEnabled: @YES,
+        ASConfigMotionVariety: @0.55, ASConfigDeterministic: @NO
     }];
 }
 

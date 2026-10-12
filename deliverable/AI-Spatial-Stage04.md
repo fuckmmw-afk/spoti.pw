@@ -1,37 +1,48 @@
-# Stage 04 — build milestones and acceptance
+# Stage 04 — Builds B–F
 
-Current release: **A — Timing & Spatial Core**. Builds B–G are work in progress.
-Spatial Live is compile-gated until build E, and new croma UI/migration until F.
-A keeps the Stage 03 UI and JamesDSP/Separator audio behavior.
+Build A remains the timing foundation: monotonic deadlines, rolling event
+density, epoch invalidation, duplicate rejection and the independent scene
+core. Builds B–F now add the live spatial path.
 
-A fixes mixed wall/monotonic clocks, reports queue wait separately, measures
-processing average once per analysis block, uses the event START deadline,
-and checks the live PCM input/output cursors. It rejects late, duplicate and
-old-epoch events. The classifier remains the Stage 03 classifier.
+Build B contains `AISpatialEventExtraction`: selected events use bounded
+raised-cosine attack/release envelopes, a short tail, deterministic overlap
+arbitration and source-indexed foreground deltas. The motion core supports
+Flyby, Arc, Depth, Bloom, Subtle Shift and Spatial Reflection with smooth
+interpolation, optional authored endpoints and bounded gesture duration.
 
-The old ten-event limit was per stem and used a fixed time bucket. A now has
-a shared rolling 60-second monotonic budget (maximum ten over both stems),
-retained across track/route/seek epochs. Sample-domain spacing is 350 ms.
-The provided local debug ZIP has no Accent Trace; the user's exact 20/12s
-segment is not independently verified. Synthetic replay covers that case.
+Build C provides a static headphone binaural renderer with equal-power ILD,
+bounded crossfeed and reflection cues. HRTF processing is optional and does
+not require head-tracking permission. `AISpatialHeadTracking` is an optional
+adapter for compatible AirPods; when unavailable the scene remains static.
 
-The independent C scene stores position, distance, source size and gain.
-Six motion types return smoothly to the base position with bounded gesture
-length and smooth attack/release. No Core ML model or IPA is included.
+Build D selects Headphones, Speakers, Universal Stereo or Mono/Safe. Bluetooth
+A2DP is treated as an unknown stereo route unless the system-reported name is a
+known headphone family. Profiles are persisted by the existing settings page;
+unknown routes use conservative width and no aggressive anti-phase processing.
 
-Run `make -C ai_spatial test`. A covers source-indexed deadlines at 44.1/48kHz,
-rolling density, duplicate/epoch cancellation, timing validity and scene/motion
-continuity. This is not an iPhone listening or 60-minute stability result.
+Build E connects the existing Separator and Accent Detector to the render-side
+bounded ring, applies spatial deltas before the single JamesDSP invocation, and
+falls back to same-index original PCM on underrun, model failure or unsupported
+sample rate. Original and Shadow preserve the current audible path.
 
-Install A's `aispatial.dylib` and matching plist in place of Stage 03; keep
-existing croma and JamesDSP files. Downloaded model stays in the app container.
-Start Original, then AI Shadow with Accent Detector on. Export Accent events
-and Detailed diagnostics after >=2 minutes, including pause/resume, seek,
-track and route changes. Verify selected events have `timely=true`, positive
-start-deadline slack, no huge negative clock values, <=10 selections in any
-60-second monotonic window, and no old-epoch selections after a boundary.
+Build F extends the AI Spatial page with mode, route/profile, intensity, width,
+depth, density, motion component switches, reflections, vocal/bass protection,
+HRTF and trace/export controls. Exports include both legacy names and
+`spatial-diagnostics.log`, `spatial-events.jsonl`, `spatial-summary.json`, and
+`spatial-timeline.csv`.
 
-Next milestones: B event extraction; C actual HRTF with headphone listening;
-D stereo/mono renderers and route profiles; E live pipeline; F unified UI and
-config migration; G tuning, performance measurements and physical 60-minute
-acceptance. Their current source scaffolding is not claimed as completed.
+## Verification
+
+`make -C ai_spatial test` runs host tests for the ring, resampler, extraction
+envelopes, overlap arbitration, scene trajectories, renderer limits, timing,
+epoch cancellation, mono safety, and bounded queues. The standalone tweak and
+JamesDSP bridge build with Theos at phase 6 in CI. These checks do not prove
+subjective sound quality, thermal headroom, or 60-minute stability on an
+iPhone; those require the user's iPhone 16 Pro and output devices.
+
+Install the staged `aispatial.dylib` and plist plus the matching
+`chromajdsp.dylib` and plist through the existing tweak mechanism. Keep the
+downloaded model in Spotify's app container. Start in **Original**, then
+**Spatial Shadow** to verify events and trace without changing sound, and only
+then enable **Spatial Live**. Export diagnostics from AI Spatial → Diagnostics
+or the settings page. Do not send exports or PCM off-device automatically.

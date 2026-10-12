@@ -51,7 +51,7 @@ static UIViewController *modSettingsPage(void) {
     audioEffects.value = ^NSString *{ return SGDSPSummary(); };
     // Home & Library holds only the native look's switches, so the redesign has no such page; the
     // Live Activity works under both, and only where ActivityKit's card does.
-    SGModRow *aiSpatial = pageRow(@"AI Spatial Engine", @"waveform.path.ecg", ^UIViewController *{ return SGAISpatialEnginePage(); });
+    SGModRow *aiSpatial = pageRow(@"AI Spatial engine", @"waveform.path.ecg", ^UIViewController *{ return SGAISpatialEnginePage(); });
     aiSpatial.value = ^NSString *{ return SGAISpatialSummary(); };
     NSMutableArray<SGModRow *> *parts = [NSMutableArray arrayWithArray:@[
         aiSpatial,

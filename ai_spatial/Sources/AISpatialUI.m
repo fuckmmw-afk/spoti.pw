@@ -540,23 +540,6 @@ static void AISpatialRewriteText(UIViewController *page) {
     });
 }
 
-/* The standalone spatial dylib is also shipped without rebuilding the full
- * Chroma settings tweak. In that installation path the existing root row is
- * still called “Sing”. Rename only that exact settings label so the feature is
- * discoverable; the row's original navigation/action remains intact and the
- * destination is upgraded by AISpatialRefreshPage below. */
-static void AISpatialRewriteRootMenu(UIViewController *controller) {
-    if (!controller || AISpatialLooksLikeSingPage(controller)) return;
-    AISpatialWalk(controller.view, ^(UIView *view) {
-        if (![view isKindOfClass:UILabel.class]) return;
-        UILabel *label=(UILabel *)view;
-        if (AISpatialEquals(label.text, @"Sing")) {
-            label.text=@"AI Spatial Engine";
-            label.accessibilityLabel=@"AI Spatial Engine";
-        }
-    });
-}
-
 static void AISpatialUpdateModelCell(UIViewController *page) {
     NSString *status = AISpatialDisplayStatus();
     AISpatialWalk(page.view, ^(UIView *view) {
@@ -678,7 +661,6 @@ static void AISpatialViewDidAppear(id self, SEL selector, BOOL animated) {
 static void AISpatialViewDidLayoutSubviews(id self, SEL selector) {
     if (gOriginalViewDidLayoutSubviews) ((void (*)(id, SEL))gOriginalViewDidLayoutSubviews)(self, selector);
     UIViewController *controller = (UIViewController *)self;
-    AISpatialRewriteRootMenu(controller);
     if (controller == gActivePage || objc_getAssociatedObject(controller, kAISpatialPageMarker) ||
         AISpatialEquals(controller.navigationItem.title, @"Sing") || AISpatialEquals(controller.navigationItem.title, @"AI Spatial")) {
         AISpatialRefreshPage(controller);
@@ -707,15 +689,8 @@ static void __attribute__((unused)) AISpatialInstallLayoutHook(void) {
 
 __attribute__((constructor)) static void AISpatialInitialize(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-#if AS_SPATIAL_BUILD_PHASE < 6
-        AISpatialInstallLifecycleHook();
-        AISpatialInstallLayoutHook();
-        [NSNotificationCenter.defaultCenter addObserverForName:AISpatialModelStoreDidChangeNotification object:AISpatialModelStore.sharedStore queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { AISpatialRefreshPage(gActivePage); }];
-#else
-        /* The feature page now belongs to the main croma Mod Settings tree.
-           Keep this dylib's UI code available for old installations, but do
-           not hook Spotify's Sing page and create a second control surface. */
-        AISpatialLog(@"AI Spatial initialized; controls are owned by croma -> AI Spatial Engine; model remains remote-only");
-#endif
+        /* The feature page belongs to the main croma Mod Settings tree.
+           This dylib never hooks, renames, or replaces Spotify's Sing page. */
+        AISpatialLog(@"AI Spatial initialized; controls are owned by croma -> AI Spatial engine; model remains remote-only");
     });
 }

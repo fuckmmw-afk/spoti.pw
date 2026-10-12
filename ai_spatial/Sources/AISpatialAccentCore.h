@@ -52,6 +52,8 @@ typedef struct {
     unsigned repeat_count;
     uint64_t density_window_start;
     unsigned density_count;
+    uint64_t density_samples[10];
+    bool has_selected;
     float previous_rms;
     bool has_previous;
 } ASAccentCoreContext;

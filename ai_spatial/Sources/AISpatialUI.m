@@ -6,6 +6,7 @@
 #import "AISpatialLog.h"
 #import "AISpatialDiagnostics.h"
 #import "AISpatialAccentDetector.h"
+#import "AISpatialBuild.h"
 
 static NSString *const kModelPageURL = @"https://huggingface.co/My-Name-Is-Jeff/vitrine-sing";
 static IMP gOriginalViewDidAppear;
@@ -597,7 +598,7 @@ static void AISpatialViewDidLayoutSubviews(id self, SEL selector) {
     }
 }
 
-static void AISpatialInstallLifecycleHook(void) {
+static void __attribute__((unused)) AISpatialInstallLifecycleHook(void) {
     if (gViewDidAppearHooked) return;
     Method method = class_getInstanceMethod(UIViewController.class, @selector(viewDidAppear:));
     if (!method) return;
@@ -607,7 +608,7 @@ static void AISpatialInstallLifecycleHook(void) {
     AISpatialLog(@"hooked UIViewController.viewDidAppear: for in-place Sing UI adaptation");
 }
 
-static void AISpatialInstallLayoutHook(void) {
+static void __attribute__((unused)) AISpatialInstallLayoutHook(void) {
     if (gViewDidLayoutHooked) return;
     Method method = class_getInstanceMethod(UIViewController.class, @selector(viewDidLayoutSubviews));
     if (!method) return;
@@ -619,14 +620,15 @@ static void AISpatialInstallLayoutHook(void) {
 
 __attribute__((constructor)) static void AISpatialInitialize(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+#if AS_SPATIAL_BUILD_PHASE < 6
         AISpatialInstallLifecycleHook();
         AISpatialInstallLayoutHook();
-        static dispatch_once_t observerOnce;
-        dispatch_once(&observerOnce, ^{
-            [[NSNotificationCenter defaultCenter] addObserverForName:AISpatialModelStoreDidChangeNotification object:AISpatialModelStore.sharedStore queue:[NSOperationQueue mainQueue] usingBlock:^(__unused NSNotification *note) {
-                AISpatialRefreshPage(gActivePage);
-            }];
-        });
-        AISpatialLog(@"AI Spatial initialized; existing Sing UI is reused, model is remote-only, JamesDSP is untouched");
+        [NSNotificationCenter.defaultCenter addObserverForName:AISpatialModelStoreDidChangeNotification object:AISpatialModelStore.sharedStore queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { AISpatialRefreshPage(gActivePage); }];
+#else
+        /* The feature page now belongs to the main croma Mod Settings tree.
+           Keep this dylib's UI code available for old installations, but do
+           not hook Spotify's Sing page and create a second control surface. */
+        AISpatialLog(@"AI Spatial initialized; controls are owned by croma -> AI Spatial Engine; model remains remote-only");
+#endif
     });
 }

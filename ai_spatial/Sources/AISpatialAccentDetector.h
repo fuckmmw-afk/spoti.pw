@@ -3,6 +3,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+FOUNDATION_EXPORT void ASAccentDetectorAttachStream(ASStreamCore *core);
 FOUNDATION_EXPORT void ASAccentDetectorSetEnabled(BOOL enabled);
 FOUNDATION_EXPORT BOOL ASAccentDetectorIsEnabled(void);
 FOUNDATION_EXPORT void ASAccentDetectorReset(void);

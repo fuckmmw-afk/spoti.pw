@@ -160,6 +160,32 @@ static void test_bounded_input_overflow(void) {
     ASStreamDestroy(&core);
 }
 
+static void test_spatial_event_is_future_stem_delta(void) {
+    ASStreamCore core;
+    assert(ASStreamInit(&core));
+    ASStreamRequestMode(&core, 2);
+    ASStreamSpatialConfigure(&core, ASSpatialRouteUniversalStereo, true, .8f, .9f, .4f, .7f, .8f, .08f);
+    float firstL[1] = {.3f}, firstR[1] = {.3f};
+    ASStreamRender(&core, firstL, firstR, 1, 44100, NAN, NAN);
+    uint64_t epoch = atomic_load(&core.epoch);
+    ASStreamOutput *stems = calloc(400, sizeof(*stems)); assert(stems);
+    for (size_t i=0;i<400;i++) stems[i]=(ASStreamOutput){epoch, 1, i, .2f, .2f, .1f, .1f};
+    assert(ASStreamPushOutput(&core, stems, 400)); free(stems);
+    ASStreamSpatialEvent event={77, epoch, 0, 250, ASSpatialStemVocal, ASSpatialMotionFlyby, .9f, .9f, 1};
+    assert(ASStreamSpatialSchedule(&core, &event));
+    const size_t delay=(size_t)llround(AS_STREAM_DELAY_SECONDS*44100);
+    float left[512], right[512]; size_t position=1; bool changed=false;
+    while (position < delay+180) {
+        size_t count=(delay+180-position)>512?512:(delay+180-position);
+        for(size_t i=0;i<count;i++){left[i]=right[i]=.3f;}
+        ASStreamRender(&core,left,right,(uint32_t)count,44100,NAN,NAN);
+        for(size_t i=0;i<count;i++) if (position+i >= delay+30 && position+i < delay+150 && fabsf(left[i]-.3f)>1e-4f) changed=true;
+        position+=count;
+    }
+    assert(changed); assert(atomic_load(&core.spatial_applied)>0);
+    ASStreamDestroy(&core);
+}
+
 int main(void) {
     test_blend_and_resample();
     test_output_ring();
@@ -168,6 +194,7 @@ int main(void) {
     test_reset_discards_previous_epoch_output();
     test_timestamp_discontinuity_starts_new_epoch();
     test_bounded_input_overflow();
+    test_spatial_event_is_future_stem_delta();
     puts("AISpatialStreamCoreTests: ok");
     return 0;
 }

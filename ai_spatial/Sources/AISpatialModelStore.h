@@ -15,6 +15,9 @@ typedef NS_ENUM(NSInteger, AISpatialModelStatus) {
 };
 
 FOUNDATION_EXPORT NSNotificationName const AISpatialModelStoreDidChangeNotification;
+FOUNDATION_EXPORT NSDictionary *AISpatialModelStatusSnapshot(void);
+FOUNDATION_EXPORT void AISpatialModelStartDownload(void);
+FOUNDATION_EXPORT void AISpatialModelCancelDownload(void);
 
 @interface AISpatialModelStore : NSObject
 

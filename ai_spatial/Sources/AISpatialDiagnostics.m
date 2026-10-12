@@ -198,6 +198,16 @@ static NSString *ASRoot(void) { NSString *base=NSSearchPathForDirectoriesInDomai
 @property(nonatomic,readwrite,copy) NSString *sessionID;
 @property(nonatomic,readwrite,copy) NSURL *sessionDirectory;
 @end
+
+NSDictionary *AISpatialDiagnosticsStatusSnapshot(void) { return AISpatialDiagnostics.sharedDiagnostics.snapshot; }
+void AISpatialDiagnosticsStart(void) { [AISpatialDiagnostics.sharedDiagnostics startRecording]; }
+void AISpatialDiagnosticsStop(void) { [AISpatialDiagnostics.sharedDiagnostics stopRecording]; }
+void AISpatialDiagnosticsSetLevelIndex(NSInteger level) {
+    [AISpatialDiagnostics.sharedDiagnostics setLevel:(AISpatialDiagnosticsLevel)MAX(0, MIN(AISpatialDiagnosticsLevelFullTrace, level))];
+}
+void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NSURL *> *, NSError *)) {
+    [AISpatialDiagnostics.sharedDiagnostics exportReportIncludingDebug:includeDebug completion:completion];
+}
 @implementation AISpatialDiagnostics {
     AISpatialDiagnosticsLevel _level;
     BOOL _recording;

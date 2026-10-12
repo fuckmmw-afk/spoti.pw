@@ -2,20 +2,35 @@ name: Build AI Spatial tweak
 
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        description: "Build milestone: A=1 B=2 C=3 D=4 E=5 F=6 G=7"
+        required: true
+        default: "1"
+        type: choice
+        options: ["1", "2", "3", "4", "5", "6", "7"]
   push:
     paths:
       - "ai_spatial/**"
       - "bridge/**"
+      - "tweak/Sources/App/ModSettings.x"
+      - "tweak/Sources/Shared/AISpatial/**"
+      - "deliverable/AI-Spatial-Stage04.md"
       - ".github/workflows/build-ai-spatial.yml"
   pull_request:
     paths:
       - "ai_spatial/**"
       - "bridge/**"
+      - "tweak/Sources/App/ModSettings.x"
+      - "tweak/Sources/Shared/AISpatial/**"
+      - "deliverable/AI-Spatial-Stage04.md"
       - ".github/workflows/build-ai-spatial.yml"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      SPATIAL_PHASE: ${{ inputs.phase || '1' }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -60,7 +75,7 @@ jobs:
       - name: Build the standalone tweak
         env:
           THEOS: ${{ runner.temp }}/theos
-        run: make -C ai_spatial clean stage
+        run: make -C ai_spatial clean stage SPATIAL_PHASE="$SPATIAL_PHASE"
 
       - name: Build the JamesDSP bridge
         env:
@@ -77,10 +92,11 @@ jobs:
           cp ai_spatial/README.md artifact/
           cp deliverable/AI-Spatial-Stage02.md artifact/
           cp deliverable/AI-Spatial-Stage03.md artifact/
+          cp deliverable/AI-Spatial-Stage04.md artifact/
           ! find artifact -type f \( -iname '*.ipa' -o -iname '*.mlmodel*' -o -iname '*.mlpackage' -o -iname 'weight.bin' \) -print -quit | grep -q .
 
       - name: Upload tweak artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ai-spatial-tweak
+          name: ai-spatial-phase-${{ env.SPATIAL_PHASE }}
           path: artifact/

@@ -5,6 +5,8 @@
 #import "AISpatialDiagnostics.h"
 #import "AISpatialLog.h"
 #import "AISpatialAccentDetector.h"
+#import "AISpatialAccentCore.h"
+#import "AISpatialConfig.h"
 #import <AVFoundation/AVFoundation.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <objc/runtime.h>
@@ -16,6 +18,7 @@ static _Atomic(uint64_t) gLastCallbackTicks;
 static _Atomic(uint64_t) gStreamingCallbackBlocks;
 static _Atomic(uint64_t) gStreamingCallbackFrames;
 static _Atomic(uint64_t) gDuplicateCallbackBlocks;
+static _Atomic(uint64_t) gSpatialScheduled;
 static _Atomic(uint64_t) gLastCallbackSampleBits;
 static _Atomic(uint64_t) gLastCallbackHostBits;
 static _Atomic(uint64_t) gLastCallbackRateBits;
@@ -24,6 +27,31 @@ static mach_timebase_info_data_t gTimebase;
 static const NSUInteger ASModelWindow = 88200, ASModelStep = 66150, ASModelOverlap = 22050;
 static const NSUInteger ASMaxRouteWindow = 96000;
 static NSString *ASModeName(int mode) { return @[@"Original", @"AI Shadow", @"AI Live", @"Vocals Only (test)", @"Instrumental Only (test)"][MIN(MAX(mode, 0), 4)]; }
+static ASSpatialRoute ASConfiguredRoute(void) {
+    if ([NSUserDefaults.standardUserDefaults boolForKey:ASConfigRouteAuto]) {
+        AVAudioSessionRouteDescription *route=AVAudioSession.sharedInstance.currentRoute;
+        AVAudioSessionPortDescription *port=route.outputs.firstObject;
+        NSString *type=port.portType;
+        if ([type isEqualToString:AVAudioSessionPortHeadphones] || [type isEqualToString:AVAudioSessionPortBluetoothHFP] || [type isEqualToString:AVAudioSessionPortBluetoothLE]) return ASSpatialRouteHeadphones;
+        if ([type isEqualToString:AVAudioSessionPortBuiltInSpeaker] || [type isEqualToString:AVAudioSessionPortAirPlay] || [type isEqualToString:AVAudioSessionPortHDMI] || [type isEqualToString:AVAudioSessionPortLineOut] || [type isEqualToString:AVAudioSessionPortUSBAudio]) return ASSpatialRouteSpeakers;
+        if ([type isEqualToString:AVAudioSessionPortBluetoothA2DP]) {
+            NSString *name=port.portName.lowercaseString;
+            if ([name containsString:@"airpods"] || [name containsString:@"beats"] || [name containsString:@"buds"]) return ASSpatialRouteHeadphones;
+            return ASSpatialRouteUniversalStereo;
+        }
+        return ASSpatialRouteMonoSafe;
+    }
+    NSInteger route=[NSUserDefaults.standardUserDefaults integerForKey:ASConfigRoute];
+    return route>=0 && route<=ASSpatialRouteMonoSafe ? (ASSpatialRoute)route : ASSpatialRouteUniversalStereo;
+}
+static void ASConfigureSpatial(ASStreamCore *core, BOOL enabled) {
+    if (!core) return;
+    NSUserDefaults *d=NSUserDefaults.standardUserDefaults;
+    bool spatialEnabled = AS_SPATIAL_BUILD_PHASE >= 5 && enabled && [d boolForKey:ASConfigEngineEnabled];
+    ASStreamSpatialConfigure(core, ASConfiguredRoute(), spatialEnabled,
+        [d doubleForKey:ASConfigIntensity], [d doubleForKey:ASConfigWidth], [d doubleForKey:ASConfigDepth],
+        [d doubleForKey:ASConfigCenterProtection], [d doubleForKey:ASConfigBassProtection], [d doubleForKey:ASConfigAntiPhaseLimit]);
+}
 static double ASTicksSeconds(uint64_t ticks) { return (double)ticks * gTimebase.numer / gTimebase.denom / 1e9; }
 static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeStamp *ts) {
     if (!ts || !(ts->mFlags & kAudioTimeStampSampleTimeValid) || !(ts->mFlags & kAudioTimeStampHostTimeValid) || !isfinite(ts->mSampleTime) || !ts->mHostTime) return NO;
@@ -86,22 +114,28 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
         return nil;
     }
     gCore = core;
+    ASAccentDetectorAttachStream(core);
     atomic_init(&gLastCallbackTicks, 0);
     atomic_init(&gStreamingCallbackBlocks, 0); atomic_init(&gStreamingCallbackFrames, 0); atomic_init(&gDuplicateCallbackBlocks, 0);
+    atomic_init(&gSpatialScheduled, 0);
     atomic_init(&gLastCallbackSampleBits, 0); atomic_init(&gLastCallbackHostBits, 0); atomic_init(&gLastCallbackRateBits, 0); atomic_init(&gLastCallbackFrames, 0);
     atomic_init(&_processed, 0); atomic_init(&_skipped, 0); atomic_init(&_submitted, 0); atomic_init(&_cancelled, 0); atomic_init(&_formed, 0); atomic_init(&_processing, 0);
     for (NSUInteger n = 0; n < 2048; n++) _hann[n] = .5f - .5f * cosf((float)(2 * M_PI * n / 2048));
     _recent = [NSMutableArray array];
-    NSInteger persistedMode = [NSUserDefaults.standardUserDefaults integerForKey:@"pw.chroma.ai-spatial.live-mode"];
+    ASConfigMigrateAndRegister();
+    NSInteger persistedMode = [NSUserDefaults.standardUserDefaults integerForKey:ASConfigBackendMode];
+    /* croma keeps Diagnostic as a user-facing mode; the audio backend uses
+       Shadow so diagnostics never make PCM audible. */
     // Model verification is asynchronous during process launch.  Do not
     // restore an AI mode before the verified model is available; this avoids a
     // silent 2.75 s preroll after a restart and requires an explicit selection
     // once the UI reports the model ready.
     if (persistedMode != AISpatialLiveModeOriginal && !AISpatialModelStore.sharedStore.modelIsReady) {
         persistedMode = AISpatialLiveModeOriginal;
-        [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"pw.chroma.ai-spatial.enabled"];
+        [NSUserDefaults.standardUserDefaults setBool:NO forKey:ASConfigEngineEnabled];
     }
     ASStreamRequestMode(core, (int)persistedMode);
+    ASConfigureSpatial(core, persistedMode == AISpatialLiveModeLive);
     _worker = dispatch_queue_create("pw.chroma.ai-spatial.stream-worker", DISPATCH_QUEUE_SERIAL);
     _workerTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _worker);
     dispatch_source_set_timer(_workerTimer, dispatch_time(DISPATCH_TIME_NOW, 0), 10 * NSEC_PER_MSEC, NSEC_PER_MSEC);
@@ -116,6 +150,7 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
         [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *note) {
             ASStreamRequestReset(core);
             ASAccentDetectorReset();
+            ASConfigureSpatial(core, atomic_load(&core->requested_mode) == AISpatialLiveModeLive);
             [AISpatialDiagnostics.sharedDiagnostics recordStage:@"Stage 02 - Streaming Buffer" event:@"audio_session_boundary" fields:@{@"reason": note.name, @"policy": @"invalidate epoch; discard stale inference; rebuild from new PCM"}];
         }];
     }
@@ -243,7 +278,7 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
         NSDictionary *report = @{
             @"stream_epoch": @(epoch), @"window_id": @(windowID), @"start_sample": @(start), @"end_sample": @(start + _routeWindow), @"output_end_sample": @(start + _step), @"sample_rate": @(_rate),
             @"input_rms": @(sqrt(inSquare / divisor)), @"input_peak": @(inPeak), @"vocal_rms": @(sqrt(vocalSquare / divisor)), @"vocal_peak": @(vPeak), @"instrumental_rms": @(sqrt(instrumentalSquare / divisor)), @"instrumental_peak": @(iPeak), @"mix_peak": @(mixPeak), @"reconstruction_error_rms": @(sqrt(errorSquare / divisor)), @"above_one": @(aboveOne),
-            @"accumulation_seconds": @2, @"stream_queue_wait_ms": @(fmax(0, (double)(cursor - start - _routeWindow) / _rate * 1000)), @"preparation_ms": @((preparationEnd - began) * 1000),
+            @"accumulation_seconds": @2, @"stream_queue_wait_ms": @(fmax(0, (double)(cursor >= start + _routeWindow ? cursor - start - _routeWindow : 0) / _rate * 1000)), @"preparation_ms": @((preparationEnd - began) * 1000),
             @"queue_wait_ms": metrics[@"queue_wait_ms"] ?: @"unavailable", @"inference_ms": metrics[@"inference_ms"] ?: @"unavailable", @"completion_wait_ms": @(inferenceWait * 1000), @"reconstruction_ms": @((done - reconstructionStart) * 1000), @"processing_total_ms": @((done - began) * 1000),
             @"ready_latency_seconds": @((double)(inputNow - start) / _rate), @"output_buffering_budget_seconds": @(AS_STREAM_DELAY_SECONDS - (double)(inputNow - start) / _rate),
             @"stem_drift_samples": @0, @"stem_drift_status": @"derived: both stems written to a single frame with same epoch/index", @"status": pushed ? @"completed" : @"output_overflow_fallback", @"worker_started_monotonic": @(began), @"worker_completed_monotonic": @(done), @"evidence": @"measured sample indices, clocks and PCM sums; configured accumulation/delay; derived RMS and deadline budget"
@@ -327,19 +362,33 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
     NSDictionary *last; NSArray *recent; @synchronized(self) { last = _lastWindow ?: @{}; recent = [_recent copy]; }
     NSMutableArray *times = [NSMutableArray array]; for (NSDictionary *r in recent) [times addObject:r[@"processing_total_ms"]]; [times sortUsingSelector:@selector(compare:)];
     id p95 = times.count >= 20 ? times[(NSUInteger)floor(.95 * (times.count - 1))] : @"unavailable; fewer than 20 processing steps";
-    return @{@"mode_name": ASModeName(mode), @"requested_mode_name": ASModeName(requested), @"mode": @(mode), @"requested_mode": @(requested), @"stream_epoch": @(atomic_load(&gCore->epoch)), @"sample_rate": @(rate), @"input_samples": @(atomic_load(&gCore->input_cursor)), @"output_sample_cursor": @(atomic_load(&gCore->output_cursor)), @"processed_windows": @(atomic_load(&_processed)), @"skipped_windows": @(atomic_load(&_skipped)), @"cancelled_windows": @(atomic_load(&_cancelled)), @"streaming_callback_blocks": @(atomic_load(&gStreamingCallbackBlocks)), @"streaming_callback_frames": @(atomic_load(&gStreamingCallbackFrames)), @"duplicate_callback_blocks": @(atomic_load(&gDuplicateCallbackBlocks)), @"queue_depth": @(atomic_load(&_processing)), @"input_buffer_frames": @(inputHead >= inputTail ? inputHead - inputTail : 0), @"output_buffer_frames": @(outputHead >= outputTail ? outputHead - outputTail : 0), @"latency_target_seconds": @(AS_STREAM_DELAY_SECONDS), @"processing_p95_ms": p95, @"sustainable_budget_ms": @1050, @"live_deadline_budget_ms": @750, @"underruns": @(atomic_load(&gCore->underruns)), @"overflows": @(atomic_load(&gCore->overflows)), @"fallbacks": @(atomic_load(&gCore->fallback_transitions)), @"input_dropped_frames": @(atomic_load(&gCore->input_dropped)), @"output_dropped_frames": @(atomic_load(&gCore->output_dropped)), @"last_window": last, @"state": mode != requested ? @"mode_pending_playback_boundary" : (rate && fabs(rate - 44100) > .5 && fabs(rate - 48000) > .5 ? @"fallback_unsupported_rate" : (mode == 0 ? @"Original" : @"running; confirm stems/deadlines in diagnostics"))};
+    return @{@"mode_name": ASModeName(mode), @"requested_mode_name": ASModeName(requested), @"mode": @(mode), @"requested_mode": @(requested), @"stream_epoch": @(atomic_load(&gCore->epoch)), @"sample_rate": @(rate), @"input_samples": @(atomic_load(&gCore->input_cursor)), @"output_sample_cursor": @(atomic_load(&gCore->output_cursor)), @"processed_windows": @(atomic_load(&_processed)), @"skipped_windows": @(atomic_load(&_skipped)), @"cancelled_windows": @(atomic_load(&_cancelled)), @"streaming_callback_blocks": @(atomic_load(&gStreamingCallbackBlocks)), @"streaming_callback_frames": @(atomic_load(&gStreamingCallbackFrames)), @"duplicate_callback_blocks": @(atomic_load(&gDuplicateCallbackBlocks)), @"spatial_enabled": @(atomic_load(&gCore->spatial.enabled)), @"spatial_route": @(atomic_load(&gCore->spatial.route)), @"spatial_scheduled": @(atomic_load(&gSpatialScheduled)), @"spatial_applied": @(atomic_load(&gCore->spatial_applied)), @"queue_depth": @(atomic_load(&_processing)), @"input_buffer_frames": @(inputHead >= inputTail ? inputHead - inputTail : 0), @"output_buffer_frames": @(outputHead >= outputTail ? outputHead - outputTail : 0), @"latency_target_seconds": @(AS_STREAM_DELAY_SECONDS), @"processing_p95_ms": p95, @"sustainable_budget_ms": @1050, @"live_deadline_budget_ms": @750, @"underruns": @(atomic_load(&gCore->underruns)), @"overflows": @(atomic_load(&gCore->overflows)), @"fallbacks": @(atomic_load(&gCore->fallback_transitions)), @"input_dropped_frames": @(atomic_load(&gCore->input_dropped)), @"output_dropped_frames": @(atomic_load(&gCore->output_dropped)), @"last_window": last, @"state": mode != requested ? @"mode_pending_playback_boundary" : (rate && fabs(rate - 44100) > .5 && fabs(rate - 48000) > .5 ? @"fallback_unsupported_rate" : (mode == 0 ? @"Original" : @"running; confirm stems/deadlines in diagnostics"))};
 }
 @end
 static AISpatialLivePipeline *gPipeline;
 __attribute__((visibility("default"))) void AISpatialLiveSetMode(AISpatialLiveMode mode) {
     if (!gCore) return;
     ASStreamRequestMode(gCore, (int)mode);
-    [NSUserDefaults.standardUserDefaults setInteger:mode forKey:@"pw.chroma.ai-spatial.live-mode"];
+    [NSUserDefaults.standardUserDefaults setInteger:mode forKey:ASConfigBackendMode];
+    ASConfigureSpatial(gCore, mode == AISpatialLiveModeLive);
     uint64_t last = atomic_load(&gLastCallbackTicks);
     if (!last || ASTicksSeconds(mach_absolute_time() - last) > .5) { ASStreamRequestReset(gCore); ASAccentDetectorReset(); }
     [AISpatialDiagnostics.sharedDiagnostics recordStage:@"Stage 02 - Streaming Buffer" event:@"mode_requested" fields:@{@"mode": ASModeName((int)mode), @"policy": @"delay changes take effect at playback boundary"}];
 }
+__attribute__((visibility("default"))) void AISpatialLiveScheduleAccent(uint64_t eventID, uint64_t epoch,
+        uint64_t start, uint64_t end, uint8_t stem, uint8_t type, float priority, float intensity, float direction) {
+    if (AS_SPATIAL_BUILD_PHASE < 5 || !gCore || end <= start) return;
+    ASStreamSpatialEvent event={.event_id=eventID,.epoch=epoch,.start_sample=start,.end_sample=end,
+        .stem=stem,.motion=(uint8_t)(type==ASAccentVocalShout || type==ASAccentInstrumentalSoundEffect ? ASSpatialMotionFlyby :
+            type==ASAccentVocalPauseContrast || type==ASAccentInstrumentalPauseTexture ? ASSpatialMotionDepth :
+            type==ASAccentVocalPhraseStart ? ASSpatialMotionArc : ASSpatialMotionSubtleShift),
+        .priority=priority,.intensity=intensity,.direction=direction};
+    if (ASStreamSpatialSchedule(gCore, &event)) atomic_fetch_add_explicit(&gSpatialScheduled, 1, memory_order_relaxed);
+}
 __attribute__((visibility("default"))) AISpatialLiveMode AISpatialLiveGetMode(void) { return gCore ? (AISpatialLiveMode)atomic_load(&gCore->requested_mode) : AISpatialLiveModeOriginal; }
+__attribute__((visibility("default"))) void AISpatialLiveRefreshConfiguration(void) {
+    if (gCore) ASConfigureSpatial(gCore, atomic_load(&gCore->active_mode) == AISpatialLiveModeLive);
+}
 __attribute__((visibility("default"))) void AISpatialLiveReset(double sampleRate) { if (gCore) ASStreamRequestReset(gCore); ASAccentDetectorReset(); }
 __attribute__((visibility("default"))) void AISpatialLiveProcessStereo(float *l, float *r, uint32_t frames, double rate, const AudioTimeStamp *ts) {
     if (ASIsDuplicateCallback(frames, rate, ts)) { atomic_fetch_add_explicit(&gDuplicateCallbackBlocks, 1, memory_order_relaxed); return; }

@@ -4,9 +4,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include "AISpatialScene.h"
+#include "AISpatialRenderers.h"
 #define AS_STREAM_CAPACITY 262144u
 #define AS_STREAM_TELEMETRY 128u
 #define AS_STREAM_DELAY_SECONDS 2.75
+#define AS_STREAM_SPATIAL_SLOTS 32u
 // Single render producer/consumer and single analysis worker. No memory in these
 // queues is reused before the other owner publishes its read cursor.
 typedef struct { uint64_t epoch, sample; float l, r; } ASStreamInput;
@@ -14,6 +17,21 @@ typedef struct { uint64_t epoch, sample; float l, r; } ASStreamInput;
 // sample index.  The render side matches only epoch + sample; block_id is
 // retained for diagnostics and exported trace correlation.
 typedef struct { uint64_t epoch, block_id, sample; float vl, vr, il, ir; } ASStreamOutput;
+typedef struct {
+    uint64_t event_id, epoch, start_sample, end_sample;
+    uint8_t stem, motion;
+    float priority, intensity, direction;
+} ASStreamSpatialEvent;
+typedef struct {
+    ASStreamSpatialEvent pending[AS_STREAM_SPATIAL_SLOTS];
+    _Atomic(uint64_t) event_head, event_tail;
+    ASStreamSpatialEvent active[8]; // render-owned; producer never modifies
+    size_t active_count;
+    uint64_t active_epoch;
+    _Atomic(uint64_t) scheduled, rejected, cancelled;
+    _Atomic(int) enabled, route;
+    _Atomic(uint32_t) intensity_bits, width_bits, depth_bits, center_bits, bass_bits, anti_phase_bits;
+} ASStreamSpatialState;
 typedef struct {
     uint64_t epoch, start, end, input_frames, output_frames, stem_frames, fallback_frames;
     uint64_t overflow, underrun, fallback_transitions, discontinuities;
@@ -28,9 +46,11 @@ typedef struct {
     ASStreamTelemetry telemetry[AS_STREAM_TELEMETRY];
     _Atomic(uint64_t) input_head, input_tail, output_head, output_tail;
     _Atomic(uint64_t) telemetry_head, telemetry_tail, telemetry_dropped;
-    _Atomic(uint64_t) epoch, reset_request, input_cursor, output_cursor;
+    _Atomic(uint64_t) epoch, reset_request, applied_reset, input_cursor, output_cursor;
     _Atomic(uint64_t) overflows, underruns, fallback_transitions, discontinuities;
     _Atomic(uint64_t) input_dropped, output_dropped, stale_outputs;
+    _Atomic(uint64_t) spatial_applied;
+    ASStreamSpatialState spatial;
     _Atomic(int) requested_mode, active_mode;
     _Atomic(uint64_t) rate_bits;
     // Render-owned state below. Other threads request boundaries, never clear it.
@@ -40,6 +60,17 @@ typedef struct {
     float stem_weight, vocal_gain, instrumental_gain;
     ASStreamTelemetry second;
 } ASStreamCore;
+typedef struct {
+    uint64_t epoch, input_cursor, output_cursor;
+    double rate;
+    bool reset_pending;
+} ASStreamClock;
+bool ASStreamReadClock(const ASStreamCore *core, ASStreamClock *clock);
+void ASStreamSpatialConfigure(ASStreamCore *core, ASSpatialRoute route, bool enabled,
+                              float intensity, float width, float depth, float center,
+                              float bass, float anti_phase);
+bool ASStreamSpatialSchedule(ASStreamCore *core, const ASStreamSpatialEvent *event);
+void ASStreamSpatialClear(ASStreamCore *core, uint64_t epoch);
 bool ASStreamInit(ASStreamCore *core);
 void ASStreamDestroy(ASStreamCore *core); // only after both owners have stopped
 void ASStreamRequestReset(ASStreamCore *core);

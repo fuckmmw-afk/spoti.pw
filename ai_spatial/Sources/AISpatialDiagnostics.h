@@ -21,6 +21,11 @@ FOUNDATION_EXPORT void AISpatialDiagnosticsSetRealtimeCaptureHookAvailable(BOOL 
 FOUNDATION_EXPORT void AISpatialDiagnosticsCapturePCM(const AudioBufferList *data, UInt32 frames,
                                                        const AudioStreamBasicDescription *format,
                                                        const AudioTimeStamp *timestamp);
+FOUNDATION_EXPORT NSDictionary *AISpatialDiagnosticsStatusSnapshot(void);
+FOUNDATION_EXPORT void AISpatialDiagnosticsStart(void);
+FOUNDATION_EXPORT void AISpatialDiagnosticsStop(void);
+FOUNDATION_EXPORT void AISpatialDiagnosticsSetLevelIndex(NSInteger level);
+FOUNDATION_EXPORT void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NSURL *> * _Nullable files, NSError * _Nullable error));
 @interface AISpatialDiagnostics : NSObject
 + (instancetype)sharedDiagnostics;
 @property(nonatomic, readonly) AISpatialDiagnosticsLevel level;

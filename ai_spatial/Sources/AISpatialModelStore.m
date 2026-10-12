@@ -59,6 +59,13 @@ static NSString *AISpatialModelRoot(void) {
 @property(nonatomic, readwrite) BOOL modelIsReady;
 @end
 
+NSDictionary *AISpatialModelStatusSnapshot(void) {
+    AISpatialModelStore *store = AISpatialModelStore.sharedStore;
+    return @{ @"status": @(store.status), @"status_text": store.statusText ?: @"", @"progress": @(store.progress), @"ready": @(store.modelIsReady), @"queue_depth": @(store.inferenceQueueDepth), @"error": store.lastError ?: @"" };
+}
+void AISpatialModelStartDownload(void) { [AISpatialModelStore.sharedStore startDownload]; }
+void AISpatialModelCancelDownload(void) { [AISpatialModelStore.sharedStore cancelDownload]; }
+
 @implementation AISpatialModelStore {
     dispatch_queue_t _queue;
     NSOperationQueue *_delegateQueue;

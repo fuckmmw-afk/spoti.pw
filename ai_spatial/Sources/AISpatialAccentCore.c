@@ -1,4 +1,5 @@
 #include "AISpatialAccentCore.h"
+#include "AISpatialEventTiming.h"
 #include <math.h>
 #include <string.h>
 
@@ -41,7 +42,12 @@ size_t ASAccentCoreAnalyze(const ASAccentFrame *frames, size_t count,
                            uint64_t available, uint64_t latency,
                            ASAccentCoreContext *c, ASAccentCoreEvent *events,
                            size_t capacity) {
-    if (!frames || !count || !c || !events || !capacity || rate <= 0 || !hop) return 0;
+    if (!frames || !count || !c || !events || !capacity || !isfinite(rate) || rate <= 0 || rate > 192000 || !hop) return 0;
+    /* Sample indices are the authoritative event clock.  A malformed window
+       must never move the scheduler backwards or create a false accent. */
+    for (size_t i = 1; i < count; i++) {
+        if (frames[i].sample <= frames[i - 1].sample) return 0;
+    }
     float mean = 0, meanFlux = 0, variance = 0, fluxVariance = 0;
     float maxRMS = 0, maxPeak = 0, maxHF = 0;
     for (size_t i = 0; i < count; i++) {
@@ -105,19 +111,23 @@ size_t ASAccentCoreAnalyze(const ASAccentFrame *frames, size_t count,
         /* Rarity and context are explicit parts of ranking. Repeated blocks do not
            receive a bonus simply because they are loud. */
         bool sameRepeat = false;
-        if (c->last_selected_sample && e->start_sample > c->last_selected_sample) {
+        if (c->has_selected && e->start_sample > c->last_selected_sample) {
             uint64_t interval = e->start_sample - c->last_selected_sample;
             if (c->repeat_interval && interval > c->repeat_interval * 7 / 10 && interval < c->repeat_interval * 13 / 10) sameRepeat = true;
             if (sameRepeat) { c->repeat_count++; c->repeat_interval = (c->repeat_interval * 3 + interval) / 4; }
             else { c->repeat_interval = interval; c->repeat_count = 1; }
         }
-        if (!c->density_window_start || e->start_sample - c->density_window_start >= (uint64_t)rate * 60) {
-            c->density_window_start = e->start_sample; c->density_count = 0;
+        unsigned kept = 0;
+        for (unsigned d = 0; d < c->density_count; d++) {
+            uint64_t past = c->density_samples[d];
+            if (e->start_sample < past || e->start_sample - past < (uint64_t)llround(rate * 60))
+                c->density_samples[kept++] = past;
         }
+        c->density_count = kept;
         e->priority = priority + (source == ASAccentSourceVocal ? .025f : 0);
         bool selected = e->priority >= .46f;
         const char *reason = "below_adaptive_priority";
-        if (selected && c->last_selected_sample && e->start_sample - c->last_selected_sample < (uint64_t)(.35 * rate)) {
+        if (selected && c->has_selected && (e->start_sample <= c->last_selected_sample || e->start_sample - c->last_selected_sample < (uint64_t)(.35 * rate))) {
             selected = false; reason = "minimum_interval";
         } else if (selected && c->repeat_count >= 2 && e->priority < c->previous_selected_score + .14f) {
             selected = false; reason = "periodic_repetition_suppressed";
@@ -125,8 +135,7 @@ size_t ASAccentCoreAnalyze(const ASAccentFrame *frames, size_t count,
             selected = false; reason = "density_limit";
         } else {
             uint64_t safety = (uint64_t)(.10 * rate);
-            uint64_t deadline = e->end_sample + latency;
-            if (deadline > safety) deadline -= safety; else deadline = 0;
+            uint64_t deadline = ASEventReadyDeadline(e->start_sample, latency, safety);
             if (selected && available > deadline) {
             selected = false; reason = "late_deadline";
             }
@@ -136,7 +145,8 @@ size_t ASAccentCoreAnalyze(const ASAccentFrame *frames, size_t count,
             c->previous_selected_sample = c->last_selected_sample;
             c->last_selected_sample = e->start_sample;
             c->previous_selected_score = e->priority;
-            c->density_count++;
+            c->has_selected = true;
+            c->density_samples[c->density_count++] = e->start_sample;
             set_reason(e, source == ASAccentSourceVocal ? "rare_contextual_vocal_accent" : "rare_contextual_instrumental_accent");
         } else set_reason(e, reason);
     }

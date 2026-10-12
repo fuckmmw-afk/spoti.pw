@@ -1,17 +1,16 @@
 # AI Spatial add-on
 
-Stage 03 adds a local **Accent Detector** after the synchronized Stage 02 stems.
-It analyzes 20 ms envelope/flux features asynchronously, ranks rare contextual
-vocal and instrumental events, suppresses repetitive hits, and exports exact
-sample-index schedules. It does not change audible audio or JamesDSP. Details,
-event schema and the iPhone acceptance procedure are in
-[`deliverable/AI-Spatial-Stage03.md`](../deliverable/AI-Spatial-Stage03.md).
+Stage 04 **build A — Timing & Spatial Core** fixes clock-domain accounting,
+start deadlines, a shared rolling event-density limit, and stale/duplicate
+event gating. It introduces the independent C spatial scene and synthetic tests.
+Spatial Live is compile-gated until E; the croma UI migration is gated until F.
+See [Stage 04 build notes](../deliverable/AI-Spatial-Stage04.md).
 
-Stage 02 streaming architecture, build commands, iPhone verification steps and
-known measurement limits are documented in
-[`deliverable/AI-Spatial-Stage02.md`](../deliverable/AI-Spatial-Stage02.md).
-
-`aispatial.dylib` is a separate Theos tweak for Spotify. It reuses the existing Croma **Sing** page in place, changes its visible name and model actions to **AI Spatial**, and leaves JamesDSP's engine, settings and presets intact. The companion bridge places the AI stage before the existing single JamesDSP call; if that bridge cannot attach, the post-render observer has a bounded float32-stereo compatibility path and reports the degraded route in diagnostics. The model remains remote-only and is downloaded by the user into the app container.
+Build A keeps the existing Stage 03 UI and the Separator/JamesDSP audio path.
+The neural model is downloaded by the user from Hugging Face and is never
+included in source or artifacts. Legacy setup is described in
+[Stage 02](../deliverable/AI-Spatial-Stage02.md) and
+[Stage 03](../deliverable/AI-Spatial-Stage03.md).
 
 ## Diagnostics
 

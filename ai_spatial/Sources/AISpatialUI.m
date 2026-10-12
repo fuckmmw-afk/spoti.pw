@@ -19,6 +19,7 @@ static const void *kAISpatialPageMarker = &kAISpatialPageMarker;
 static const void *kAISpatialActionTarget = &kAISpatialActionTarget;
 static const void *kAISpatialFooterMarker = &kAISpatialFooterMarker;
 static const void *kAISpatialActivationSwitch = &kAISpatialActivationSwitch;
+static const void *kAISpatialRootRowMarker = &kAISpatialRootRowMarker;
 static const void *kASUIAssociatedKey = &kASUIAssociatedKey;
 static const void *kASUIPreset = &kASUIPreset;
 
@@ -40,6 +41,44 @@ static const void *kASUIPreset = &kASUIPreset;
 @property(nonatomic,strong) UISegmentedControl *modeControl;
 @property(nonatomic,strong) UISegmentedControl *routeControl;
 @property(nonatomic,strong) UILabel *statusLabel;
+@end
+
+@interface AISpatialRootMenuRow : UIControl
+@end
+
+@implementation AISpatialRootMenuRow {
+    UIImageView *_icon;
+    UILabel *_title;
+    UILabel *_subtitle;
+    UIImageView *_chevron;
+}
+- (instancetype)initWithFrame:(CGRect)frame {
+    if (!(self = [super initWithFrame:frame])) return nil;
+    self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
+    self.layer.cornerRadius = 12;
+    self.clipsToBounds = YES;
+    _icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"waveform.path.ecg" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightMedium]]];
+    _icon.tintColor = UIColor.whiteColor;
+    _icon.backgroundColor = [UIColor colorWithRed:0.34 green:0.28 blue:0.85 alpha:1];
+    _icon.layer.cornerRadius = 7;
+    _icon.contentMode = UIViewContentModeCenter;
+    _title = [UILabel new]; _title.text = @"AI Spatial engine"; _title.textColor = UIColor.whiteColor; _title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    _subtitle = [UILabel new]; _subtitle.text = @"Local selective spatial audio"; _subtitle.textColor = [UIColor colorWithWhite:0.68 alpha:1]; _subtitle.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    _chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold]]]; _chevron.tintColor = UIColor.whiteColor; _chevron.contentMode = UIViewContentModeCenter;
+    for (UIView *view in @[_icon, _title, _subtitle, _chevron]) [self addSubview:view];
+    self.accessibilityLabel = @"AI Spatial engine";
+    self.accessibilityHint = @"Open AI Spatial engine settings";
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = self.bounds.size.height;
+    _icon.frame = CGRectMake(12, (h - 32) / 2, 32, 32);
+    _title.frame = CGRectMake(56, h / 2 - 19, MAX(0, self.bounds.size.width - 104), 20);
+    _subtitle.frame = CGRectMake(56, h / 2 + 2, MAX(0, self.bounds.size.width - 104), 17);
+    _chevron.frame = CGRectMake(self.bounds.size.width - 34, (h - 20) / 2, 20, 20);
+}
+- (void)setHighlighted:(BOOL)highlighted { [super setHighlighted:highlighted]; self.alpha = highlighted ? 0.55 : 1; }
 @end
 
 static const void *kAISpatialAccentEventID = &kAISpatialAccentEventID;
@@ -540,6 +579,46 @@ static void AISpatialRewriteText(UIViewController *page) {
     });
 }
 
+static BOOL AISpatialLooksLikeRootMenu(UIViewController *controller) {
+    if (!controller || AISpatialLooksLikeSingPage(controller) || !AISpatialTable(controller)) return NO;
+    __block BOOL hasSing = NO, hasAudioEffects = NO, hasMod = NO;
+    AISpatialWalk(controller.view, ^(UIView *view) {
+        if (![view isKindOfClass:UILabel.class]) return;
+        NSString *text = ((UILabel *)view).text ?: @"";
+        hasSing |= AISpatialEquals(text, @"Sing");
+        hasAudioEffects |= AISpatialEquals(text, @"Audio effects");
+        hasMod |= AISpatialEquals(text, @"Mod");
+    });
+    return hasSing && hasAudioEffects && hasMod;
+}
+
+static void AISpatialInstallRootMenuRow(UIViewController *controller) {
+    if (!AISpatialLooksLikeRootMenu(controller)) return;
+    UITableView *table = AISpatialTable(controller);
+    if (!table || objc_getAssociatedObject(table, kAISpatialRootRowMarker)) return;
+    AISpatialRootMenuRow *row = [[AISpatialRootMenuRow alloc] initWithFrame:CGRectZero];
+    AISpatialActionTarget *target = [AISpatialActionTarget new];
+    target.page = controller;
+    [row addTarget:target action:@selector(openControls:) forControlEvents:UIControlEventTouchUpInside];
+    objc_setAssociatedObject(row, kAISpatialActionTarget, target, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIView *oldFooter = table.tableFooterView;
+    CGFloat oldHeight = oldFooter ? MAX(CGRectGetHeight(oldFooter.bounds), 1) : 0;
+    CGFloat width = MAX(CGRectGetWidth(table.bounds), 320);
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, oldHeight + 76)];
+    footer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    row.frame = CGRectMake(16, 8, width - 32, 56);
+    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [footer addSubview:row];
+    if (oldFooter) {
+        oldFooter.frame = CGRectMake(0, 76, width, oldHeight);
+        oldFooter.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [footer addSubview:oldFooter];
+    }
+    table.tableFooterView = footer;
+    objc_setAssociatedObject(table, kAISpatialRootRowMarker, row, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    AISpatialLog(@"AI Spatial root settings row installed without changing Sing");
+}
+
 static void AISpatialUpdateModelCell(UIViewController *page) {
     NSString *status = AISpatialDisplayStatus();
     AISpatialWalk(page.view, ^(UIView *view) {
@@ -661,8 +740,9 @@ static void AISpatialViewDidAppear(id self, SEL selector, BOOL animated) {
 static void AISpatialViewDidLayoutSubviews(id self, SEL selector) {
     if (gOriginalViewDidLayoutSubviews) ((void (*)(id, SEL))gOriginalViewDidLayoutSubviews)(self, selector);
     UIViewController *controller = (UIViewController *)self;
+    AISpatialInstallRootMenuRow(controller);
     if (controller == gActivePage || objc_getAssociatedObject(controller, kAISpatialPageMarker) ||
-        AISpatialEquals(controller.navigationItem.title, @"Sing") || AISpatialEquals(controller.navigationItem.title, @"AI Spatial")) {
+        AISpatialEquals(controller.navigationItem.title, @"AI Spatial")) {
         AISpatialRefreshPage(controller);
     }
 }
@@ -689,6 +769,7 @@ static void __attribute__((unused)) AISpatialInstallLayoutHook(void) {
 
 __attribute__((constructor)) static void AISpatialInitialize(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        AISpatialInstallLayoutHook();
         /* The feature page belongs to the main croma Mod Settings tree.
            This dylib never hooks, renames, or replaces Spotify's Sing page. */
         AISpatialLog(@"AI Spatial initialized; controls are owned by croma -> AI Spatial engine; model remains remote-only");

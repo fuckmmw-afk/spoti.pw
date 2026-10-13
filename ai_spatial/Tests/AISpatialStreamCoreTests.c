@@ -188,6 +188,40 @@ static void test_spatial_event_is_future_stem_delta(void) {
     ASStreamDestroy(&core);
 }
 
+static void test_live_base_scene_changes_stem_mix_without_event(void) {
+    ASStreamCore core;
+    assert(ASStreamInit(&core));
+    ASStreamRequestMode(&core, 2);
+    ASStreamSpatialConfigure(&core, ASSpatialRouteUniversalStereo, true, .8f, .9f, .4f, .7f, .8f, .08f);
+    ASStreamSpatialSetComponents(&core, true, true, true, true, true);
+    float firstL[1] = {.3f}, firstR[1] = {.2f};
+    ASStreamRender(&core, firstL, firstR, 1, 44100, NAN, NAN);
+    uint64_t epoch = atomic_load(&core.epoch);
+    const size_t stemFrames = 400;
+    ASStreamOutput *stems = calloc(stemFrames, sizeof(*stems)); assert(stems);
+    for (size_t i = 0; i < stemFrames; i++) {
+        /* The source mix is (.30, .20), but it has a measurable side signal. */
+        stems[i] = (ASStreamOutput){epoch, 2, i, .20f, .10f, .10f, .10f};
+    }
+    assert(ASStreamPushOutput(&core, stems, stemFrames)); free(stems);
+    const size_t delay = (size_t)llround(AS_STREAM_DELAY_SECONDS * 44100);
+    float left[512], right[512]; size_t position = 1; bool changed = false;
+    while (position < delay + 180) {
+        size_t count = (delay + 180 - position) > 512 ? 512 : delay + 180 - position;
+        for (size_t i = 0; i < count; i++) { left[i] = .3f; right[i] = .2f; }
+        ASStreamRender(&core, left, right, (uint32_t)count, 44100, NAN, NAN);
+        for (size_t i = 0; i < count; i++) {
+            if (position + i >= delay + 30 && fabsf(left[i] - .3f) > 1e-4f) changed = true;
+        }
+        position += count;
+    }
+    assert(changed);
+    assert(atomic_load(&core.spatial_applied) == 0);
+    assert(atomic_load(&core.spatial_base_applied) > 0);
+    assert(atomic_load(&core.spatial_nonzero_delta) > 0);
+    ASStreamDestroy(&core);
+}
+
 int main(void) {
     test_blend_and_resample();
     test_output_ring();
@@ -197,6 +231,7 @@ int main(void) {
     test_timestamp_discontinuity_starts_new_epoch();
     test_bounded_input_overflow();
     test_spatial_event_is_future_stem_delta();
+    test_live_base_scene_changes_stem_mix_without_event();
     puts("AISpatialStreamCoreTests: ok");
     return 0;
 }

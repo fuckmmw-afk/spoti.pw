@@ -118,6 +118,9 @@ static OSStatus ASRendered(void *refCon, AudioUnitRenderActionFlags *flags, cons
                         data->mBuffers[0].mData && data->mBuffers[1].mData;
     if (process && (!bridgeActive || !bridgeActive()) && splitFloat32) {
         process((float *)data->mBuffers[0].mData, (float *)data->mBuffers[1].mData, frames, gCaptureFormat.mSampleRate, timestamp);
+        AISpatialLiveRecordTerminalStereo((float *)data->mBuffers[0].mData,
+                                           (float *)data->mBuffers[1].mData,
+                                           frames, gCaptureFormat.mSampleRate);
         processedByFallback = YES;
     }
     if (!processedByFallback && !atomic_load_explicit(&gStreamingBridgeActive, memory_order_acquire)) AISpatialDiagnosticsCapturePCM(data,frames,&gCaptureFormat,timestamp);

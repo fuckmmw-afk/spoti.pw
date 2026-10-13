@@ -223,6 +223,7 @@ static void ASUIRefreshSpatial(void) {
     self.recordButton = [self button:@"Start diagnostics" action:@selector(toggleRecording:)]; [stack addArrangedSubview:self.recordButton];
     [stack addArrangedSubview:[self button:@"Export report (log, timeline, metadata)" action:@selector(exportReport:)]];
     [stack addArrangedSubview:[self button:@"Export Full Trace debug ZIP" action:@selector(exportDebug:)]];
+    [stack addArrangedSubview:[self button:@"Run Spatial Output Self-Test (A → B → C)" action:@selector(selfTest:)]];
     [stack addArrangedSubview:[self button:@"Clear diagnostics" action:@selector(clearLogs:)]];
     [scroll addSubview:stack]; [self.view addSubview:scroll];
     UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
@@ -241,13 +242,21 @@ static void ASUIRefreshSpatial(void) {
     AISpatialDiagnostics *diagnostics = AISpatialDiagnostics.sharedDiagnostics; NSDictionary *snapshot = diagnostics.snapshot;
     AISpatialModelStore *model = AISpatialModelStore.sharedStore;
     NSDictionary *live = AISpatialLiveStatusSnapshot();
-    self.statusLabel.text = [NSString stringWithFormat:@"State: %@\nLevel: %@\nSession: %@\nModel: %@\nModel status: %@\nLive mode: %@\nLive state: %@", snapshot[@"state"], snapshot[@"level"], snapshot[@"session_id"], model.modelIsReady ? @"ready" : @"not ready", model.statusText ?: @"unavailable", live[@"mode_name"] ?: @"Original", live[@"state"] ?: @"unavailable"];
+    NSDictionary *selfTest = AISpatialLiveSelfTestStatusSnapshot();
+    self.statusLabel.text = [NSString stringWithFormat:@"State: %@\nLevel: %@\nSession: %@\nModel: %@\nModel status: %@\nLive mode: %@\nLive state: %@\nSelf-test: %@ (%@)", snapshot[@"state"], snapshot[@"level"], snapshot[@"session_id"], model.modelIsReady ? @"ready" : @"not ready", model.statusText ?: @"unavailable", live[@"mode_name"] ?: @"Original", live[@"state"] ?: @"unavailable", selfTest[@"phase"] ?: @"Idle", selfTest[@"actual_renderer"] ?: @"unavailable"];
     self.counterLabel.text = [NSString stringWithFormat:@"Processed windows: %@\nSkipped windows: %@\nLive callbacks: %@ blocks / %@ frames (duplicates %@)\nLive processed/skipped: %@ / %@\nStems rendered/fallback frames: %@ / %@\nSpatial enabled: %@\nSpatial base frames: %@\nAccent applied: %@\nNonzero output delta: %@\nDelta peak/RMS: %@ / %@\nInference queue: %lu\nLive queue: %@\nLive latency target: %@ s\nLive underruns/overflows/fallbacks: %@ / %@ / %@\nDropped diagnostic events: %@\nDropped PCM capture blocks: %@\nWriter queue: %@ events / %@ bytes\nLog bytes: %@\nDebug bytes: %@\nWarnings: %@  Errors: %@\nMemory: measured when a timeline row is emitted", snapshot[@"processed_windows"], snapshot[@"skipped_windows"], live[@"streaming_callback_blocks"] ?: @0, live[@"streaming_callback_frames"] ?: @0, live[@"duplicate_callback_blocks"] ?: @0, live[@"processed_windows"] ?: @0, live[@"skipped_windows"] ?: @0, live[@"rendered_stem_frames"] ?: @0, live[@"rendered_fallback_frames"] ?: @0, [live[@"spatial_enabled"] boolValue] ? @"YES" : @"NO", live[@"spatial_base_applied"] ?: @0, live[@"spatial_applied"] ?: @0, live[@"spatial_nonzero_delta_samples"] ?: @0, live[@"spatial_delta_peak"] ?: @0, live[@"spatial_delta_rms"] ?: @0, (unsigned long)model.inferenceQueueDepth, live[@"queue_depth"] ?: @0, live[@"latency_target_seconds"] ?: @0, live[@"underruns"] ?: @0, live[@"overflows"] ?: @0, live[@"fallbacks"] ?: @0, snapshot[@"dropped_events"], snapshot[@"dropped_capture_blocks"], snapshot[@"writer_queue_depth"], snapshot[@"writer_queue_bytes"], snapshot[@"log_bytes"], snapshot[@"debug_bytes"], snapshot[@"warnings"], snapshot[@"errors"]];
     [self.recordButton setTitle:diagnostics.recording ? @"Stop diagnostics" : @"Start diagnostics" forState:UIControlStateNormal];
     self.levelControl.selectedSegmentIndex = diagnostics.level;
 }
 - (void)levelChanged:(UISegmentedControl *)control { [AISpatialDiagnostics.sharedDiagnostics setLevel:(AISpatialDiagnosticsLevel)control.selectedSegmentIndex]; [self refresh]; }
 - (void)toggleRecording:(id)sender { if (AISpatialDiagnostics.sharedDiagnostics.recording) [AISpatialDiagnostics.sharedDiagnostics stopRecording]; else [AISpatialDiagnostics.sharedDiagnostics startRecording]; [self refresh]; }
+- (void)selfTest:(id)sender {
+    NSDictionary *status = AISpatialLiveSelfTestStatusSnapshot();
+    NSString *phase = status[@"phase"] ?: @"Idle";
+    if (![phase isEqualToString:@"Idle"]) { AISpatialLiveStopSpatialSelfTest(); [self refresh]; return; }
+    AISpatialLiveStartSpatialSelfTest();
+    [self refresh];
+}
 - (void)shareFiles:(NSArray<NSURL *> *)files fromError:(NSError *)error {
     if (error || !files.count) { UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Diagnostics" message:error.localizedDescription ?: @"No diagnostic report is available." preferredStyle:UIAlertControllerStyleAlert]; [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]]; [self presentViewController:alert animated:YES completion:nil]; return; }
     UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:files applicationActivities:nil]; [self presentViewController:share animated:YES completion:nil];

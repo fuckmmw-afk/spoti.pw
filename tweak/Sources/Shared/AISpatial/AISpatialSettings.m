@@ -53,6 +53,7 @@ typedef void (*ASSetModeFn)(NSInteger);
 typedef NSInteger (*ASGetModeFn)(void);
 typedef NSDictionary *(*ASStatusFn)(void);
 typedef NSDictionary *(*ASAccentStatusFn)(void);
+typedef NSDictionary *(*ASSelfTestStatusFn)(void);
 typedef void (*ASAccentEnabledFn)(BOOL);
 typedef void (*ASDiagnosticsLevelFn)(NSInteger);
 typedef void (*ASDiagnosticsToggleFn)(void);
@@ -60,6 +61,7 @@ typedef void (*ASModelActionFn)(void);
 typedef NSDictionary *(*ASModelStatusFn)(void);
 typedef void (*ASDiagnosticsExportFn)(BOOL, void (^)(NSArray<NSURL *> *, NSError *));
 typedef void (*ASRefreshFn)(void);
+typedef void (*ASSelfTestFn)(void);
 
 static void *asSymbol(const char *name) { return dlsym(RTLD_DEFAULT, name); }
 static void refreshBackend(void) { ASRefreshFn fn=(ASRefreshFn)asSymbol("AISpatialLiveRefreshConfiguration"); if(fn) fn(); }
@@ -174,6 +176,7 @@ UIViewController *SGAISpatialEnginePage(void) {
     SGModRow *deterministic=SGOptionRow(@"Deterministic Test Mode", @"Repeatable event IDs and motion choices for offline replay", kDeterministic);
     SGModRow *record=SGActionRow(@"Start / stop diagnostics", nil, ^{ NSDictionary *s=nil; ASDiagnosticsToggleFn start=(ASDiagnosticsToggleFn)asSymbol("AISpatialDiagnosticsStart"); ASDiagnosticsToggleFn stop=(ASDiagnosticsToggleFn)asSymbol("AISpatialDiagnosticsStop"); ASStatusFn statusFn=(ASStatusFn)asSymbol("AISpatialDiagnosticsStatusSnapshot"); s=statusFn?statusFn():@{}; if([s[@"recording"] boolValue]){if(stop)stop();}else{if(start)start();} });
     SGModRow *export=SGActionRow(@"Export diagnostics", @"JSONL, summary, CSV and diagnostics log", ^{ASDiagnosticsExportFn fn=(ASDiagnosticsExportFn)asSymbol("AISpatialDiagnosticsExport"); if(fn)fn([NSUserDefaults.standardUserDefaults boolForKey:kFullTrace], ^(NSArray *files,NSError *error){dispatch_async(dispatch_get_main_queue(),^{showFiles(files,error);});});});
+    SGModRow *selfTest=SGActionRow(@"Run Spatial Output Self-Test", @"A Output Path → B Renderer → C Event Integration; bypasses Accent Detector for 8.5 seconds", ^{ ASSelfTestStatusFn statusFn=(ASSelfTestStatusFn)asSymbol("AISpatialLiveSelfTestStatusSnapshot"); NSDictionary *test=statusFn?statusFn():@{}; ASSelfTestFn stop=(ASSelfTestFn)asSymbol("AISpatialLiveStopSpatialSelfTest"); ASSelfTestFn start=(ASSelfTestFn)asSymbol("AISpatialLiveStartSpatialSelfTest"); if ([[test[@"phase"] description] isEqualToString:@"Idle"]) { if(start) start(); } else if(stop) { stop(); } });
     SGModRow *accentSummary=SGStatRow(@"Accent queue", ^NSString *{NSDictionary *s=accentStatus(); return s.count?[NSString stringWithFormat:@"%@ selected · %@ ms avg",s[@"selected"],s[@"processing_avg_ms"]]:@"Unavailable";});
     SGModRow *dsp=SGStatRow(@"JamesDSP", ^NSString *{return SGDSPSummary();});
     SGModRow *dspPage=SGPageRow(@"JamesDSP controls", ^UIViewController *{return SGDSPSettingsPage();});
@@ -184,6 +187,6 @@ UIViewController *SGAISpatialEnginePage(void) {
         SGSection(@"AI Processing", @[separator,accent,rate,accentSummary,model]),
         SGSection(@"JamesDSP", @[dsp,dspPage]),
         SGSection(@"Presets", presetRows),
-        SGSection(@"Diagnostics", @[full,spatial,deterministic,record,export]),
+        SGSection(@"Diagnostics", @[full,spatial,deterministic,record,selfTest,export]),
     ] footer:@"Spatial events are selective accents. Two stems cannot guarantee independent lead and adlib separation; failures return to synchronized Original PCM."];
 }

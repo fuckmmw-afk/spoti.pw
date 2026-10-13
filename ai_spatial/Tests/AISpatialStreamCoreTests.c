@@ -222,6 +222,34 @@ static void test_live_base_scene_changes_stem_mix_without_event(void) {
     ASStreamDestroy(&core);
 }
 
+static void test_spatial_self_test_scheduler_path(void) {
+    ASStreamCore core;
+    assert(ASStreamInit(&core));
+    ASStreamSpatialConfigure(&core, ASSpatialRouteUniversalStereo, true, .9f, .95f, .5f, .55f, .8f, .08f);
+    ASStreamSpatialSetSelfTest(&core, true);
+    float left[64], right[64];
+    for (size_t i=0;i<16;i++) left[i]=right[i]=.25f;
+    ASStreamRender(&core,left,right,16,44100,NAN,NAN);
+    uint64_t epoch=atomic_load(&core.epoch);
+    ASStreamSpatialEvent event={.event_id=901,.epoch=epoch,.start_sample=24,.end_sample=180,.stem=ASSpatialStemVocal,.motion=ASSpatialMotionArc,.priority=.95f,.intensity=.9f,.direction=1,.attack_seconds=.01f,.release_seconds=.02f,.tail_seconds=.01f};
+    assert(ASStreamSpatialSchedule(&core,&event));
+    bool changed=false;
+    for (size_t block=0; block<12; block++) {
+        for (size_t i=0;i<64;i++) left[i]=right[i]=.25f;
+        ASStreamRender(&core,left,right,64,44100,NAN,NAN);
+        for (size_t i=0;i<64;i++) if (fabsf(left[i]-.25f)>1e-5f || fabsf(right[i]-.25f)>1e-5f) changed=true;
+    }
+    assert(changed);
+    assert(atomic_load(&core.spatial.scheduled)==1);
+    assert(atomic_load(&core.spatial.activated)==1);
+    assert(atomic_load(&core.spatial.rendered_events)==1);
+    assert(atomic_load(&core.spatial.mixed_events)==1);
+    assert(atomic_load(&core.spatial.submitted_events)==1);
+    assert(atomic_load(&core.spatial.completed_events)==1);
+    assert(atomic_load(&core.spatial_applied)>0);
+    ASStreamDestroy(&core);
+}
+
 int main(void) {
     test_blend_and_resample();
     test_output_ring();
@@ -232,6 +260,7 @@ int main(void) {
     test_bounded_input_overflow();
     test_spatial_event_is_future_stem_delta();
     test_live_base_scene_changes_stem_mix_without_event();
+    test_spatial_self_test_scheduler_path();
     puts("AISpatialStreamCoreTests: ok");
     return 0;
 }

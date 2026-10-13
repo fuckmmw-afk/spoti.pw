@@ -23,6 +23,9 @@ typedef struct {
     uint8_t stem, motion;
     float priority, intensity, direction;
     float attack_seconds, release_seconds, tail_seconds;
+    /* Render-owner lifecycle bits.  They are deliberately part of the event
+       copy so the producer never touches render state after publication. */
+    uint8_t lifecycle_rendered, lifecycle_mixed;
 } ASStreamSpatialEvent;
 typedef struct {
     ASStreamSpatialEvent pending[AS_STREAM_SPATIAL_SLOTS];
@@ -31,10 +34,13 @@ typedef struct {
     size_t active_count;
     uint64_t active_epoch;
     _Atomic(uint64_t) scheduled, rejected, cancelled;
+    _Atomic(uint64_t) activated, rendered_events, mixed_events, submitted_events, completed_events;
+    _Atomic(uint64_t) stale_epoch, late_events, capacity_rejected, duplicate_rejected;
     _Atomic(int) enabled, route;
     _Atomic(uint32_t) intensity_bits, width_bits, depth_bits, center_bits, bass_bits, anti_phase_bits;
     _Atomic(int) accent_motion, stereo_width, depth_enabled, reflections, hrtf;
     _Atomic(unsigned) max_active;
+    _Atomic(int) self_test;
 } ASStreamSpatialState;
 typedef struct {
     uint64_t epoch, start, end, input_frames, output_frames, stem_frames, fallback_frames;
@@ -61,6 +67,7 @@ typedef struct {
     _Atomic(uint32_t) spatial_delta_peak_bits;
     _Atomic(uint32_t) spatial_delta_rms_bits;
     _Atomic(uint64_t) rendered_stem_frames, rendered_fallback_frames;
+    _Atomic(uint64_t) terminal_frames;
     ASStreamSpatialState spatial;
     _Atomic(int) requested_mode, active_mode;
     _Atomic(uint64_t) rate_bits;
@@ -86,6 +93,7 @@ void ASStreamSpatialSetComponents(ASStreamCore *core, bool accent_motion, bool s
 void ASStreamSpatialSetMaxActive(ASStreamCore *core, unsigned max_active);
 bool ASStreamSpatialSchedule(ASStreamCore *core, const ASStreamSpatialEvent *event);
 void ASStreamSpatialClear(ASStreamCore *core, uint64_t epoch);
+void ASStreamSpatialSetSelfTest(ASStreamCore *core, bool enabled);
 bool ASStreamInit(ASStreamCore *core);
 void ASStreamDestroy(ASStreamCore *core); // only after both owners have stopped
 void ASStreamRequestReset(ASStreamCore *core);

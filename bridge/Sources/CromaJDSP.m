@@ -55,8 +55,10 @@ static OSStatus (*gAudioOutputUnitStart)(AudioUnit);
 // dylib remains usable when the AI tweak is absent or its model is unavailable.
 typedef void (*AISpatialLiveProcessFn)(float *left, float *right, UInt32 frames, double sampleRate, const AudioTimeStamp *timestamp);
 typedef void (*AISpatialLiveResetFn)(double sampleRate);
+typedef void (*AISpatialTerminalCaptureFn)(float *left, float *right, UInt32 frames, double sampleRate);
 static _Atomic(AISpatialLiveProcessFn) gAISpatialLiveProcess;
 static _Atomic(AISpatialLiveResetFn) gAISpatialLiveReset;
+static _Atomic(AISpatialTerminalCaptureFn) gAISpatialTerminalCapture;
 // The AI tweak can use its own post-render observer as a compatibility
 // fallback when this bridge was not loaded or Spotify no longer imports
 // AudioOutputUnitStart.  Export a small readiness query so the two observers
@@ -94,6 +96,12 @@ static void resolveAISpatialBridge(void) {
     if (!reset) {
         reset = (AISpatialLiveResetFn)resolveAISpatialSymbol("AISpatialLiveReset");
         if (reset) atomic_store_explicit(&gAISpatialLiveReset, reset, memory_order_release);
+    }
+    AISpatialTerminalCaptureFn terminal = atomic_load_explicit(&gAISpatialTerminalCapture, memory_order_acquire);
+    if (!terminal) {
+        terminal = (AISpatialTerminalCaptureFn)resolveAISpatialSymbol("AISpatialLiveRecordTerminalStereo");
+        if (!terminal) terminal = (AISpatialTerminalCaptureFn)resolveAISpatialSymbol("AISpatialDiagnosticsCaptureTerminalPCM");
+        if (terminal) atomic_store_explicit(&gAISpatialTerminalCapture, terminal, memory_order_release);
     }
 }
 // The JamesDSP setters rebuild filter state.  Reapplying them from the polling timer
@@ -272,6 +280,8 @@ static BOOL processBuffers(SGDSPEngine *engine, AudioUnitRenderActionFlags *flag
         AISpatialLiveProcessFn aiProcess = atomic_load_explicit(&gAISpatialLiveProcess, memory_order_acquire);
         if (aiProcess) aiProcess(left, right, frames, sampleRate, timestamp);
         if (engine) SGDSPEngineProcess(engine, left, right, frames);
+        AISpatialTerminalCaptureFn terminal = atomic_load_explicit(&gAISpatialTerminalCapture, memory_order_acquire);
+        if (terminal) terminal(left, right, frames, sampleRate);
         loud = !silent;
     } else {
         for (UInt32 done = 0; done < frames;) {
@@ -296,6 +306,8 @@ static BOOL processBuffers(SGDSPEngine *engine, AudioUnitRenderActionFlags *flag
                 aiProcess(gLeft, gRight, count, sampleRate, chunkTimestampPointer);
             }
             if (engine) SGDSPEngineProcess(engine, gLeft, gRight, count);
+            AISpatialTerminalCaptureFn terminal = atomic_load_explicit(&gAISpatialTerminalCapture, memory_order_acquire);
+            if (terminal) terminal(gLeft, gRight, count, sampleRate);
             loud = loud || !silent;
             void *firstOut = data->mBuffers[0].mData;
             void *secondOut = split && channels > 1 ? data->mBuffers[1].mData : firstOut;

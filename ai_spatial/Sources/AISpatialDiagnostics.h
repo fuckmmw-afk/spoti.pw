@@ -23,6 +23,17 @@ FOUNDATION_EXPORT void AISpatialDiagnosticsCapturePCM(const AudioBufferList *dat
                                                        const AudioTimeStamp *timestamp);
 FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureSpatialPCM(const float *left, const float *right,
                                                               UInt32 frames, double sampleRate);
+// Captures the same buffer after the JamesDSP bridge has finished processing.
+// This is the terminal audible PCM path used for Spatial.wav when available.
+FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureTerminalPCM(const float *left, const float *right,
+                                                               UInt32 frames, double sampleRate);
+FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureEventForegroundPCM(const float *left, const float *right,
+                                                                      UInt32 frames, double sampleRate);
+FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureEventForegroundDeltaPCM(const float *originalLeft, const float *originalRight,
+                                                                           const float *spatialLeft, const float *spatialRight,
+                                                                           UInt32 frames, double sampleRate);
+FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureEventForegroundFromSpatialPCM(const float *spatialLeft, const float *spatialRight,
+                                                                                  UInt32 frames, double sampleRate);
 FOUNDATION_EXPORT NSDictionary *AISpatialDiagnosticsStatusSnapshot(void);
 FOUNDATION_EXPORT void AISpatialDiagnosticsStart(void);
 FOUNDATION_EXPORT void AISpatialDiagnosticsStop(void);

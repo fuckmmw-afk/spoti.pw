@@ -39,6 +39,16 @@ The legacy Stage 01 post-render observer remains metrics-only when the bridge is
 
 To collect Stage 01 while Spotify is playing, open **Diagnostics**, select Detailed or Full Trace, press **Start diagnostics**, return to playback for the required interval, then press **Stop diagnostics**. Run **Test first 30 seconds** separately to populate Stages 02–10. The resulting session distinguishes the realtime Spotify blocks from the offline picker input instead of combining them.
 
+### Spatial Output Self-Test
+
+From **AI Spatial → Diagnostics**, press **Run Spatial Output Self-Test (A → B → C)** while listening at a safe volume. The finite test lasts about 8.5 seconds, bypasses Accent Detector scheduling temporarily, leaves JamesDSP settings unchanged, and restores the previous Spatial mode.
+
+1. **A — Output Path Test** applies a bounded pan/level trajectory directly to the mutable PCM buffer that is handed to JamesDSP.
+2. **B — Renderer Test** runs known trajectories through Headphones, Speakers, Universal Stereo and Mono/Safe in one-second segments.
+3. **C — Event Integration Test** schedules known events at future sample indices through the ordinary scheduler and render mixer, without Core ML or Accent Detector input.
+
+The report records changed frames, output delta RMS/peak, frames processed by each renderer, event lifecycle counts, current stream epoch and actual renderer. If A produces no terminal PCM change, detector thresholds cannot fix the output path; inspect the bridge hook and `terminal_output_verified` in `spatial-clips/spatial-export.json`.
+
 ## Offline test
 
 **Test first 30 seconds** reads the first 30 seconds (or the entire shorter file), converts to 44.1 kHz float32 stereo, and runs 2-second windows (2048-point periodic-Hann STFT, 441-sample hop, reflected boundaries) with the model's fixed `[1,2050,201,2]` contract. Dimension 1 interleaves the two channels for each frequency bin and dimension 3 stores the real/imaginary pair. The model output is decoded as a complex vocal spectrum; the packed `vDSP_fft_zrip` inverse is scaled by `1/(2N)` and its squared-Hann weight is removed before overlap blending. `instrumental` is then computed as the original PCM minus the overlap-added vocals. The trace measures input preparation, windowing, STFT, Core ML input/output, inverse STFT, residual reconstruction, overlap blending, per-second levels and the RMS difference between `vocals + instrumental` and the source.

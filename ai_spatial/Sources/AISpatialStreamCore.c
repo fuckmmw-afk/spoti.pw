@@ -27,9 +27,15 @@ bool ASStreamInit(ASStreamCore *c) {
     atomic_init(&c->spatial_nonzero_delta, 0); atomic_init(&c->spatial_delta_peak_bits, 0);
     atomic_init(&c->spatial_delta_rms_bits, 0);
     atomic_init(&c->rendered_stem_frames, 0); atomic_init(&c->rendered_fallback_frames, 0);
+    atomic_init(&c->terminal_frames, 0);
     atomic_init(&c->rate_bits, 0);
     atomic_init(&c->spatial.event_head, 0); atomic_init(&c->spatial.event_tail, 0);
     atomic_init(&c->spatial.scheduled, 0); atomic_init(&c->spatial.rejected, 0); atomic_init(&c->spatial.cancelled, 0); atomic_init(&c->spatial.enabled, 0); atomic_init(&c->spatial.route, ASSpatialRouteUniversalStereo);
+    atomic_init(&c->spatial.activated, 0); atomic_init(&c->spatial.rendered_events, 0); atomic_init(&c->spatial.mixed_events, 0);
+    atomic_init(&c->spatial.submitted_events, 0); atomic_init(&c->spatial.completed_events, 0);
+    atomic_init(&c->spatial.stale_epoch, 0); atomic_init(&c->spatial.late_events, 0);
+    atomic_init(&c->spatial.capacity_rejected, 0); atomic_init(&c->spatial.duplicate_rejected, 0);
+    atomic_init(&c->spatial.self_test, 0);
     atomic_init(&c->spatial.accent_motion, 1); atomic_init(&c->spatial.stereo_width, 1); atomic_init(&c->spatial.depth_enabled, 1); atomic_init(&c->spatial.reflections, 1); atomic_init(&c->spatial.hrtf, 1);
     atomic_init(&c->spatial.max_active, 3);
     atomic_init(&c->spatial.intensity_bits, ASFloatBits(.55f)); atomic_init(&c->spatial.width_bits, ASFloatBits(.65f)); atomic_init(&c->spatial.depth_bits, ASFloatBits(.40f));
@@ -64,11 +70,18 @@ void ASStreamSpatialConfigure(ASStreamCore *c, ASSpatialRoute route, bool enable
     atomic_store_explicit(&c->spatial.enabled, enabled, memory_order_release);
 }
 bool ASStreamSpatialSchedule(ASStreamCore *c, const ASStreamSpatialEvent *event) {
-    if (!c || !event || event->end_sample <= event->start_sample || event->stem > ASSpatialStemInstrumental ||
+    if (!c) return false;
+    if (!event || event->end_sample <= event->start_sample || event->stem > ASSpatialStemInstrumental ||
         event->motion > ASSpatialMotionReflection || !isfinite(event->priority) || !isfinite(event->intensity) ||
         !isfinite(event->direction) || !isfinite(event->attack_seconds) || !isfinite(event->release_seconds) ||
         !isfinite(event->tail_seconds) || event->attack_seconds < 0 || event->release_seconds < 0 ||
-        event->tail_seconds < 0 || event->tail_seconds > .45f || event->epoch != atomic_load_explicit(&c->epoch, memory_order_acquire)) return false;
+        event->tail_seconds < 0 || event->tail_seconds > .45f) {
+        atomic_fetch_add_explicit(&c->spatial.rejected,1,memory_order_relaxed); return false;
+    }
+    if (event->epoch != atomic_load_explicit(&c->epoch, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&c->spatial.rejected,1,memory_order_relaxed);
+        atomic_fetch_add_explicit(&c->spatial.stale_epoch,1,memory_order_relaxed); return false;
+    }
     // One Accent producer and one render consumer. Publish after copying, and
     // never reuse a slot until the render consumer releases its tail.
     uint64_t head=atomic_load_explicit(&c->spatial.event_head,memory_order_relaxed);
@@ -83,26 +96,45 @@ bool ASStreamSpatialSchedule(ASStreamCore *c, const ASStreamSpatialEvent *event)
 }
 void ASStreamSpatialClear(ASStreamCore *c, uint64_t epoch) {
     if (!c) return;
-    // Only the render owner clears active sources. Pending entries are rejected
-    // by epoch while draining; do not reset the producer's head.
+    // A boundary owns both queues. Leaving pending entries behind made the
+    // next epoch spend its first callbacks rejecting stale events and hid the
+    // real reason an accent never reached the renderer.
     atomic_fetch_add_explicit(&c->spatial.cancelled,c->spatial.active_count,memory_order_relaxed);
+    uint64_t head = atomic_load_explicit(&c->spatial.event_head, memory_order_acquire);
+    uint64_t tail = atomic_load_explicit(&c->spatial.event_tail, memory_order_relaxed);
+    if (head > tail) atomic_fetch_add_explicit(&c->spatial.cancelled, head - tail, memory_order_relaxed);
+    atomic_store_explicit(&c->spatial.event_tail, head, memory_order_release);
     c->spatial.active_count=0; c->spatial.active_epoch=epoch;
+}
+void ASStreamSpatialSetSelfTest(ASStreamCore *c, bool enabled) {
+    if (!c) return;
+    atomic_store_explicit(&c->spatial.self_test, enabled, memory_order_release);
 }
 static void ASStreamSpatialDrain(ASStreamCore *c, uint64_t epoch) {
     uint64_t tail=atomic_load_explicit(&c->spatial.event_tail,memory_order_relaxed);
     uint64_t head=atomic_load_explicit(&c->spatial.event_head,memory_order_acquire);
     for (unsigned budget=0;tail<head && budget<AS_STREAM_SPATIAL_SLOTS;budget++,tail++) {
         ASStreamSpatialEvent event=c->spatial.pending[tail % AS_STREAM_SPATIAL_SLOTS];
-        if (event.epoch!=epoch || event.start_sample<atomic_load_explicit(&c->output_cursor,memory_order_relaxed)) {
-            atomic_fetch_add_explicit(&c->spatial.cancelled,1,memory_order_relaxed); continue;
+        if (event.epoch!=epoch) {
+            atomic_fetch_add_explicit(&c->spatial.cancelled,1,memory_order_relaxed);
+            atomic_fetch_add_explicit(&c->spatial.stale_epoch,1,memory_order_relaxed); continue;
+        }
+        if (event.start_sample<atomic_load_explicit(&c->output_cursor,memory_order_relaxed)) {
+            atomic_fetch_add_explicit(&c->spatial.cancelled,1,memory_order_relaxed);
+            atomic_fetch_add_explicit(&c->spatial.late_events,1,memory_order_relaxed); continue;
         }
         bool duplicate=false;
         for(size_t i=0;i<c->spatial.active_count;i++) if(c->spatial.active[i].event_id==event.event_id) duplicate=true;
         unsigned maxActive=atomic_load_explicit(&c->spatial.max_active,memory_order_relaxed); if (maxActive<1 || maxActive>8) maxActive=8;
         if (duplicate || c->spatial.active_count>=maxActive) {
-            atomic_fetch_add_explicit(&c->spatial.rejected,1,memory_order_relaxed); continue;
+            atomic_fetch_add_explicit(&c->spatial.rejected,1,memory_order_relaxed);
+            if (duplicate) atomic_fetch_add_explicit(&c->spatial.duplicate_rejected,1,memory_order_relaxed);
+            else atomic_fetch_add_explicit(&c->spatial.capacity_rejected,1,memory_order_relaxed);
+            continue;
         }
+        event.lifecycle_rendered = 0; event.lifecycle_mixed = 0;
         c->spatial.active[c->spatial.active_count++]=event;
+        atomic_fetch_add_explicit(&c->spatial.activated,1,memory_order_relaxed);
     }
     atomic_store_explicit(&c->spatial.event_tail,tail,memory_order_release);
 }
@@ -227,6 +259,7 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
         atomic_store_explicit(&c->spatial_delta_rms_bits, 0, memory_order_relaxed);
         atomic_store_explicit(&c->rendered_stem_frames, 0, memory_order_relaxed);
         atomic_store_explicit(&c->rendered_fallback_frames, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->terminal_frames, 0, memory_order_relaxed);
         // All published frames belong to the previous epoch.  Discard them in
         // O(1) on the render side; the worker's epoch check prevents a stale
         // in-flight prediction from being published after this point.
@@ -271,17 +304,23 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
         float reference_l = in_l, reference_r = in_r;
         bool spatial_frame = false, base_frame = false;
         uint64_t source = position;
-        if (mode >= 2 && supported) {
+        bool selfTest = atomic_load_explicit(&c->spatial.self_test, memory_order_acquire);
+        if ((mode >= 2 && supported) || selfTest) {
             /* The analysis queue needs a preroll before a stem can be aligned.
              * Never turn that bounded wait into silence: preserve the exact
              * input sample until a same-epoch stem frame is available. */
-            if (offset < delay) { out_l = in_l; out_r = in_r; fallback = true; }
+            if (!selfTest && offset < delay) { out_l = in_l; out_r = in_r; fallback = true; }
             else {
-                source = position - delay;
+                source = selfTest ? position : position - delay;
                 float original_l = c->history_l[source % AS_STREAM_CAPACITY], original_r = c->history_r[source % AS_STREAM_CAPACITY];
                 reference_l = original_l; reference_r = original_r;
                 ASStreamOutput f={0};
-                has_stems = pop_matching(c, epoch, source, &f, &staleDiscardBudget);
+                if (selfTest) {
+                    f = (ASStreamOutput){ .epoch = epoch, .sample = source, .vl = original_l, .vr = original_r };
+                    has_stems = true;
+                } else {
+                    has_stems = pop_matching(c, epoch, source, &f, &staleDiscardBudget);
+                }
                 if (has_stems && (!isfinite(f.vl) || !isfinite(f.vr) || !isfinite(f.il) || !isfinite(f.ir))) has_stems = false;
                 fallback = !has_stems;
                 c->stem_weight = approach(c->stem_weight, has_stems ? 1 : 0, fade_step);
@@ -305,17 +344,22 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
                     if (!atomic_load_explicit(&c->spatial.depth_enabled, memory_order_relaxed)) cfg.depth = 0;
                     cfg.reflection_enabled = atomic_load_explicit(&c->spatial.reflections, memory_order_relaxed);
                     cfg.hrtf_enabled = atomic_load_explicit(&c->spatial.hrtf, memory_order_relaxed);
-                    ASStreamSpatialEvent bestVocal={0}, bestInstrumental={0}; bool haveVocal=false, haveInstrumental=false;
+                    ASStreamSpatialEvent bestVocal={0}, bestInstrumental={0};
+                    ASStreamSpatialEvent *bestVocalRef=NULL, *bestInstrumentalRef=NULL;
+                    bool haveVocal=false, haveInstrumental=false;
                     for (size_t si=0; si<c->spatial.active_count; si++) {
-                        ASStreamSpatialEvent ev=c->spatial.active[si];
+                        ASStreamSpatialEvent *active = &c->spatial.active[si];
+                        ASStreamSpatialEvent ev=*active;
                         if (ev.epoch!=epoch || source<ev.start_sample || source>=ev.end_sample) continue;
-                        if (ev.stem==ASSpatialStemVocal) { if (!haveVocal || ev.priority>bestVocal.priority) bestVocal=ev; haveVocal=true; }
-                        else { if (!haveInstrumental || ev.priority>bestInstrumental.priority) bestInstrumental=ev; haveInstrumental=true; }
+                        if (ev.stem==ASSpatialStemVocal) { if (!haveVocal || ev.priority>bestVocal.priority) { bestVocal=ev; bestVocalRef=active; } haveVocal=true; }
+                        else { if (!haveInstrumental || ev.priority>bestInstrumental.priority) { bestInstrumental=ev; bestInstrumentalRef=active; } haveInstrumental=true; }
                     }
                     for (unsigned selectedStem=0; selectedStem<2; selectedStem++) {
                         bool have=selectedStem==0?haveVocal:haveInstrumental;
                         if (!have) continue;
                         ASStreamSpatialEvent ev=selectedStem==0?bestVocal:bestInstrumental;
+                        ASStreamSpatialEvent *active = selectedStem==0 ? bestVocalRef : bestInstrumentalRef;
+                        if (!active) continue;
                         double elapsed=(double)(source-ev.start_sample)/rate;
                         ASSpatialSource spatialSource={.stem=(ASSpatialStem)ev.stem,.position={0,-1,0},.distance=0,.size=.4f,.gain=1};
                         float gestureDuration=(float)((double)(ev.end_sample-ev.start_sample)/rate);
@@ -323,10 +367,20 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
                         ASSpatialPosition position=ASSpatialMotionPosition(&spatialSource,&motion,elapsed);
                         ASExtractEvent extract={.event_id=ev.event_id,.stream_epoch=ev.epoch,.start_sample=ev.start_sample,.end_sample=ev.end_sample,.source=ev.stem,.priority=ev.priority,.intensity=ev.intensity,.attack_seconds=ev.attack_seconds,.release_seconds=ev.release_seconds,.tail_seconds=ev.tail_seconds,.selected=true};
                         float env=ASExtractEnvelope(source,&extract,rate), sl=0, sr=0;
+                        if (env > 0 && !active->lifecycle_rendered) {
+                            active->lifecycle_rendered = 1;
+                            atomic_fetch_add_explicit(&c->spatial.rendered_events,1,memory_order_relaxed);
+                        }
                         if (ev.stem==ASSpatialStemVocal) { ASSpatialRenderStereo(&cfg,position,f.vl,f.vr,env,&sl,&sr); mix_vl += sl-f.vl; mix_vr += sr-f.vr; }
                         else { ASSpatialRenderStereo(&cfg,position,f.il,f.ir,env,&sl,&sr); mix_il += sl-f.il; mix_ir += sr-f.ir; }
                         atomic_fetch_add_explicit(&c->spatial_applied, 1, memory_order_relaxed);
                         spatial_frame = true;
+                        float eventDelta = fabsf(sl - (ev.stem == ASSpatialStemVocal ? f.vl : f.il)) + fabsf(sr - (ev.stem == ASSpatialStemVocal ? f.vr : f.ir));
+                        if (eventDelta > 1e-7f && !active->lifecycle_mixed) {
+                            active->lifecycle_mixed = 1;
+                            atomic_fetch_add_explicit(&c->spatial.mixed_events,1,memory_order_relaxed);
+                            atomic_fetch_add_explicit(&c->spatial.submitted_events,1,memory_order_relaxed);
+                        }
                     }
                 }
                 float mix_l = has_stems ? mix_vl * c->vocal_gain + mix_il * c->instrumental_gain : original_l;
@@ -399,7 +453,10 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
     uint64_t played=atomic_load_explicit(&c->output_cursor,memory_order_relaxed);
     for(size_t i=0;i<c->spatial.active_count;) {
         uint64_t tail=(uint64_t)llround(fmaxf(c->spatial.active[i].tail_seconds,0)*rate);
-        if(c->spatial.active[i].end_sample + tail <= played) c->spatial.active[i]=c->spatial.active[--c->spatial.active_count];
+        if(c->spatial.active[i].end_sample + tail <= played) {
+            atomic_fetch_add_explicit(&c->spatial.completed_events,1,memory_order_relaxed);
+            c->spatial.active[i]=c->spatial.active[--c->spatial.active_count];
+        }
         else i++;
     }
     if (queue_input) atomic_store_explicit(&c->input_head, head + n, memory_order_release);

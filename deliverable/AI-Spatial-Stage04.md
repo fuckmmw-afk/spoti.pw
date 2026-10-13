@@ -46,3 +46,36 @@ downloaded model in Spotify's app container. Start in **Original**, then
 **Spatial Shadow** to verify events and trace without changing sound, and only
 then enable **Spatial Live**. Export diagnostics from AI Spatial → Diagnostics
 or the settings page. Do not send exports or PCM off-device automatically.
+
+## Stage 04 incident diagnosis
+
+The supplied debug archive showed that the first five-second clip was taken
+before the user switched from Shadow/Original to Live. The selected events in
+epochs 9 and 11 were therefore invalidated at the Live boundary; the value
+`spatial_events_applied=7680` was one event's processed sample count, not 7680
+events. The old export also wrote `Difference.wav` and
+`Event-Foreground.wav` as raw float32 payloads and did not prove the terminal
+JamesDSP buffer.
+
+The fix keeps one audible owner for the path (Spotify callback → Spatial →
+JamesDSP → terminal AudioBufferList), captures the terminal buffer after
+JamesDSP, clears stale pending events at epoch boundaries, separates cumulative
+event lifecycle counters from per-second frame counters, and writes four
+aligned float32 WAVs with a sidecar containing exact sample bounds and metrics.
+
+## Stage 04 output-path self-test
+
+The Diagnostics page now exposes **Run Spatial Output Self-Test (A → B → C)**.
+It bypasses Accent Detector for one finite run and restores the previous mode:
+
+- **A Output Path Test** changes the same in-place PCM buffer that JamesDSP
+  receives. Its terminal buffer is captured after JamesDSP.
+- **B Renderer Test** runs one-second trajectories through Headphones, Speakers,
+  Universal Stereo and Mono/Safe.
+- **C Event Integration Test** schedules future sample-indexed events through
+  the normal scheduler, mixer and output callback without Core ML input.
+
+Use a safe listening level. A report with `terminal_output_verified=false`
+cannot prove audible output and must not be treated as a Spatial Live fix.
+`spatial-clips/spatial-export.json` gives the exact sample range, WAV metrics,
+changed-sample percentage, renderer/profile identity and event counters.

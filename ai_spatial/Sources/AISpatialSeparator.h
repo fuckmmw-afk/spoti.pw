@@ -38,5 +38,10 @@ FOUNDATION_EXPORT void AISpatialLiveProcessStereo(float *left, float *right, uin
                                                    double sampleRate,
                                                    const AudioTimeStamp *timestamp);
 FOUNDATION_EXPORT NSDictionary *AISpatialLiveStatusSnapshot(void);
+FOUNDATION_EXPORT void AISpatialLiveStartSpatialSelfTest(void);
+FOUNDATION_EXPORT void AISpatialLiveStopSpatialSelfTest(void);
+FOUNDATION_EXPORT NSDictionary *AISpatialLiveSelfTestStatusSnapshot(void);
+FOUNDATION_EXPORT void AISpatialLiveRecordTerminalStereo(float *left, float *right, uint32_t frames,
+                                                         double sampleRate);
 
 NS_ASSUME_NONNULL_END

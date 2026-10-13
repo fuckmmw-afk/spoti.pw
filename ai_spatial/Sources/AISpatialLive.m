@@ -27,6 +27,35 @@ static mach_timebase_info_data_t gTimebase;
 static const NSUInteger ASModelWindow = 88200, ASModelStep = 66150, ASModelOverlap = 22050;
 static const NSUInteger ASMaxRouteWindow = 96000;
 static NSString *ASModeName(int mode) { return @[@"Original", @"AI Shadow", @"AI Live", @"Vocals Only (test)", @"Instrumental Only (test)"][MIN(MAX(mode, 0), 4)]; }
+static NSString *ASRouteName(int route) { return @[@"Headphones binaural", @"Speakers", @"Universal Stereo", @"Mono / Safe Fallback"][MIN(MAX(route,0),3)]; }
+static NSString *ASProfileName(NSInteger profile) { return @[@"Headphones", @"Speakers", @"Universal", @"Bluetooth", @"AirPlay", @"Universal Safe"][MIN(MAX(profile,0),5)]; }
+typedef NS_ENUM(int, ASSpatialSelfTestPhase) {
+    ASSpatialSelfTestIdle = 0,
+    ASSpatialSelfTestOutputPath = 1,
+    ASSpatialSelfTestRenderer = 2,
+    ASSpatialSelfTestEventIntegration = 3,
+    ASSpatialSelfTestComplete = 4,
+};
+static _Atomic(int) gSelfTestPhase;
+static _Atomic(uint64_t) gSelfTestPhaseFrames;
+static _Atomic(uint64_t) gSelfTestTotalFrames;
+static _Atomic(uint64_t) gSelfTestChangedFrames;
+static _Atomic(uint64_t) gSelfTestChangedSquare;
+static _Atomic(uint32_t) gSelfTestChangedPeakBits;
+static _Atomic(uint64_t) gSelfTestRendererFrames[4];
+static _Atomic(uint64_t) gSelfTestEventsScheduled;
+static _Atomic(uint64_t) gSelfTestPreviousMode;
+static _Atomic(bool) gSelfTestPreviousAccent;
+static _Atomic(uint64_t) gSelfTestNextEventSample;
+static _Atomic(uint64_t) gSelfTestEventID;
+static _Atomic(uint64_t) gTerminalFrames;
+static float gSelfTestBeforeLeft[4096], gSelfTestBeforeRight[4096];
+
+static void ASStoreFloatBits(_Atomic(uint32_t) *slot, float value) { uint32_t bits; memcpy(&bits, &value, sizeof(bits)); atomic_store_explicit(slot, bits, memory_order_relaxed); }
+static float ASLoadFloatBits(_Atomic(uint32_t) *slot) { uint32_t bits=atomic_load_explicit(slot,memory_order_relaxed); float value; memcpy(&value,&bits,sizeof(value)); return value; }
+static const char *ASSelfTestPhaseName(int phase) {
+    switch (phase) { case ASSpatialSelfTestOutputPath: return "Output Path Test"; case ASSpatialSelfTestRenderer: return "Renderer Test"; case ASSpatialSelfTestEventIntegration: return "Event Integration Test"; case ASSpatialSelfTestComplete: return "Complete"; default: return "Idle"; }
+}
 static ASSpatialRoute ASConfiguredRoute(void) {
     if ([NSUserDefaults.standardUserDefaults boolForKey:ASConfigRouteAuto]) {
         AVAudioSessionRouteDescription *route=AVAudioSession.sharedInstance.currentRoute;
@@ -134,6 +163,11 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
     atomic_init(&gSpatialScheduled, 0);
     atomic_init(&gLastCallbackSampleBits, 0); atomic_init(&gLastCallbackHostBits, 0); atomic_init(&gLastCallbackRateBits, 0); atomic_init(&gLastCallbackFrames, 0);
     atomic_init(&_processed, 0); atomic_init(&_skipped, 0); atomic_init(&_submitted, 0); atomic_init(&_cancelled, 0); atomic_init(&_formed, 0); atomic_init(&_processing, 0);
+    atomic_init(&gSelfTestPhase, ASSpatialSelfTestIdle); atomic_init(&gSelfTestPhaseFrames, 0); atomic_init(&gSelfTestTotalFrames, 0);
+    atomic_init(&gSelfTestChangedFrames, 0); atomic_init(&gSelfTestChangedSquare, 0); atomic_init(&gSelfTestChangedPeakBits, 0);
+    for (unsigned i=0;i<4;i++) atomic_init(&gSelfTestRendererFrames[i],0);
+    atomic_init(&gSelfTestEventsScheduled,0); atomic_init(&gSelfTestPreviousMode,0); atomic_init(&gSelfTestPreviousAccent,false);
+    atomic_init(&gSelfTestNextEventSample,0); atomic_init(&gSelfTestEventID,0); atomic_init(&gTerminalFrames,0);
     for (NSUInteger n = 0; n < 2048; n++) _hann[n] = .5f - .5f * cosf((float)(2 * M_PI * n / 2048));
     _recent = [NSMutableArray array];
     ASConfigMigrateAndRegister();
@@ -186,6 +220,8 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
         @"build_phase": @(AS_SPATIAL_BUILD_PHASE),
         @"deterministic_test_mode": @([NSUserDefaults.standardUserDefaults boolForKey:ASConfigDeterministic]),
         @"preset_profile": @([NSUserDefaults.standardUserDefaults integerForKey:ASConfigProfile]),
+        @"preset_profile_name": ASProfileName([NSUserDefaults.standardUserDefaults integerForKey:ASConfigProfile]),
+        @"actual_renderer_type": gCore ? ASRouteName(atomic_load_explicit(&gCore->spatial.route,memory_order_acquire)) : @"unavailable",
         @"renderer_parameters": @{
             @"intensity": @([NSUserDefaults.standardUserDefaults doubleForKey:ASConfigIntensity]),
             @"width": @([NSUserDefaults.standardUserDefaults doubleForKey:ASConfigWidth]),
@@ -347,6 +383,7 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
     _trackPosition = position.doubleValue; _trackRate = playbackRate ? playbackRate.doubleValue : 0; _trackObserved = now;
 }
 - (void)drainTelemetry {
+    if (atomic_load_explicit(&gSelfTestPhase, memory_order_acquire)==ASSpatialSelfTestComplete) AISpatialLiveStopSpatialSelfTest();
     if (AISpatialDiagnostics.sharedDiagnostics.recording) [self announceMetadata];
     ASStreamTelemetry s;
     while (ASStreamPopTelemetry(gCore, &s)) {
@@ -376,7 +413,7 @@ static BOOL ASIsDuplicateCallback(UInt32 frames, double rate, const AudioTimeSta
             @"inference_min_ms": sorted.count ? sorted.firstObject : @"unavailable", @"inference_avg_ms": sorted.count ? @(tsum / sorted.count) : @"unavailable", @"inference_max_ms": sorted.count ? sorted.lastObject : @"unavailable", @"inference_p95_ms": sorted.count >= 20 ? sorted[(NSUInteger)floor(.95 * (sorted.count - 1))] : @"unavailable; fewer than 20 steps in second", @"inference_scope": @"total processing step, including resampling/STFT/queue/inference/ISTFT",
             @"queue_wait_avg_ms": sorted.count ? @(qsum / sorted.count) : @"unavailable", @"queue_depth_max": status[@"queue_depth"], @"input_buffer_frames": status[@"input_buffer_frames"], @"output_buffer_frames": status[@"output_buffer_frames"],
             @"additional_latency_seconds": s.mode >= 2 ? @(AS_STREAM_DELAY_SECONDS) : @0, @"additional_latency_evidence": @"measured output source index = input index - configured fixed delay; 20 ms original-to-delayed crossfade avoids a silent preroll", @"stem_drift_samples": last[@"stem_drift_samples"] ?: @"unavailable", @"underrun_frames": @(s.underrun), @"overflow_blocks": @(s.overflow), @"fallback_transitions": @(s.fallback_transitions), @"fallback_frames_this_second": @(s.fallback_frames), @"stem_frames_this_second": @(s.stem_frames), @"spatial_events_scheduled": @(atomic_load(&gSpatialScheduled)), @"spatial_events_applied": @(atomic_load(&gCore->spatial_applied)), @"spatial_events_rejected": @(atomic_load(&gCore->spatial.rejected)), @"spatial_events_cancelled": @(atomic_load(&gCore->spatial.cancelled)), @"spatial_base_frames": @(s.spatial_base_frames), @"spatial_changed_frames": @(s.spatial_changed_frames), @"spatial_delta_peak": @(s.spatial_delta_peak), @"spatial_delta_rms": @(s.input_frames ? sqrt(s.spatial_delta_square / (2 * s.input_frames)) : 0), @"rendered_stem_frames": status[@"rendered_stem_frames"], @"rendered_fallback_frames": status[@"rendered_fallback_frames"], @"spatial_renderer": status[@"spatial_route"] ?: @"unavailable", @"dropped_buffers": status[@"input_dropped_frames"], @"diagnostic_telemetry_dropped": @(atomic_load(&gCore->telemetry_dropped)),
-            @"memory_bytes": memory[@"physical_footprint_bytes"] ?: @"unavailable", @"memory_measurement_time": @"timeline emission; whole process task_info", @"thermal_state": @(NSProcessInfo.processInfo.thermalState), @"temperature_celsius": @"unavailable; no public iOS temperature API", @"errors": @0, @"warnings": s.fallback_frames ? @"synchronized fallback active; inspect deadline/model/window events" : @"none"
+            @"memory_bytes": memory[@"physical_footprint_bytes"] ?: @"unavailable", @"memory_measurement_time": @"timeline emission; whole process task_info", @"thermal_state": @(NSProcessInfo.processInfo.thermalState), @"temperature_celsius": @"unavailable; no public iOS temperature API", @"events_detected": ASAccentDetectorSnapshot()[@"candidates"] ?: @0, @"events_selected": ASAccentDetectorSnapshot()[@"selected"] ?: @0, @"events_scheduled": @(atomic_load(&gSpatialScheduled)), @"events_scheduled_total": @(atomic_load(&gSpatialScheduled)), @"events_activated": @(atomic_load(&gCore->spatial.activated)), @"events_rendered": @(atomic_load(&gCore->spatial.rendered_events)), @"events_mixed": @(atomic_load(&gCore->spatial.mixed_events)), @"events_submitted_to_output": @(atomic_load(&gCore->spatial.submitted_events)), @"events_completed": @(atomic_load(&gCore->spatial.completed_events)), @"events_rejected": @(atomic_load(&gCore->spatial.rejected)), @"events_cancelled_stale_epoch": @(atomic_load(&gCore->spatial.stale_epoch)), @"events_cancelled_late": @(atomic_load(&gCore->spatial.late_events)), @"frames_spatial_renderer_this_second": @(s.spatial_frames), @"frames_bypassed_this_second": @(s.fallback_frames), @"frames_fallback_output_this_second": @(s.fallback_frames), @"actual_renderer_type": ASRouteName(atomic_load(&gCore->spatial.route)), @"selected_profile_id": @([NSUserDefaults.standardUserDefaults integerForKey:ASConfigProfile]), @"selected_profile_name": ASProfileName([NSUserDefaults.standardUserDefaults integerForKey:ASConfigProfile]), @"actual_spatial_live": @(s.mode == 2 && atomic_load(&gCore->spatial.enabled)), @"current_stream_epoch": @(s.epoch), @"terminal_output_frames": @(atomic_load(&gTerminalFrames)), @"self_test": AISpatialLiveSelfTestStatusSnapshot(), @"errors": @0, @"warnings": s.fallback_frames ? @"synchronized fallback active; inspect deadline/model/window events" : @"none"
         }];
     }
 }
@@ -437,6 +474,92 @@ __attribute__((visibility("default"))) void AISpatialLiveRefreshConfiguration(vo
     if (gCore) ASConfigureSpatial(gCore, ASStreamSpatialLiveRequested(gCore));
 }
 __attribute__((visibility("default"))) void AISpatialLiveReset(double sampleRate) { if (gCore) ASStreamRequestReset(gCore); ASAccentDetectorReset(); }
+
+static void ASSelfTestAccumulate(const float *beforeL, const float *beforeR, const float *afterL, const float *afterR, uint32_t frames) {
+    uint64_t square=0, changed=0; float peak=0;
+    for (uint32_t i=0;i<frames;i++) {
+        float dl=afterL[i]-beforeL[i], dr=afterR[i]-beforeR[i];
+        float d=fmaxf(fabsf(dl),fabsf(dr));
+        if (d>1e-7f) changed++;
+        square += (uint64_t)llround((double)dl*dl*1e9) + (uint64_t)llround((double)dr*dr*1e9);
+        peak=fmaxf(peak,d);
+    }
+    atomic_fetch_add_explicit(&gSelfTestChangedFrames,changed,memory_order_relaxed);
+    atomic_fetch_add_explicit(&gSelfTestChangedSquare,square,memory_order_relaxed);
+    float old=ASLoadFloatBits(&gSelfTestChangedPeakBits); if (peak>old) ASStoreFloatBits(&gSelfTestChangedPeakBits,peak);
+    atomic_fetch_add_explicit(&gSelfTestTotalFrames,frames,memory_order_relaxed);
+}
+
+static void ASSelfTestOutputPath(float *left, float *right, uint32_t frames, double rate) {
+    uint64_t base=atomic_load_explicit(&gSelfTestPhaseFrames,memory_order_relaxed);
+    if (frames>4096) return;
+    memcpy(gSelfTestBeforeLeft,left,frames*sizeof(float)); memcpy(gSelfTestBeforeRight,right,frames*sizeof(float));
+    for(uint32_t i=0;i<frames;i++) {
+        float pan=0.82f*sinf((float)(2.0*M_PI*((double)(base+i)/fmax(rate,1.0))*0.7));
+        float leftGain=0.84f-0.12f*pan, rightGain=0.84f+0.12f*pan;
+        left[i]*=leftGain; right[i]*=rightGain;
+    }
+    ASSelfTestAccumulate(gSelfTestBeforeLeft,gSelfTestBeforeRight,left,right,frames);
+}
+
+static void ASSelfTestRenderer(float *left, float *right, uint32_t frames, double rate) {
+    uint64_t base=atomic_load_explicit(&gSelfTestPhaseFrames,memory_order_relaxed);
+    unsigned route=MIN(3u,(unsigned)((double)base/fmax(rate,1.0)));
+    atomic_fetch_add_explicit(&gSelfTestRendererFrames[route],frames,memory_order_relaxed);
+    if (frames>4096) return;
+    memcpy(gSelfTestBeforeLeft,left,frames*sizeof(float)); memcpy(gSelfTestBeforeRight,right,frames*sizeof(float));
+    ASSpatialRenderConfig cfg; ASSpatialRenderConfigDefault(&cfg,(ASSpatialRoute)route);
+    cfg.intensity=.9f; cfg.width=.95f; cfg.depth=.55f; cfg.center_protection=.55f; cfg.bass_protection=.8f;
+    for(uint32_t i=0;i<frames;i++) {
+        double seconds=(double)(base+i)/fmax(rate,1.0); float u=fmodf((float)seconds,1.0f);
+        ASSpatialPosition p={.x=sinf((float)(2*M_PI*u)),.y=-.5f+.35f*sinf((float)(M_PI*u)),.z=.15f*cosf((float)(2*M_PI*u))};
+        float l=left[i],r=right[i]; ASSpatialRenderStereo(&cfg,p,l,r,.9f,&left[i],&right[i]);
+    }
+    ASSelfTestAccumulate(gSelfTestBeforeLeft,gSelfTestBeforeRight,left,right,frames);
+}
+
+static void ASSelfTestMaybeAdvance(double rate) {
+    int phase=atomic_load_explicit(&gSelfTestPhase,memory_order_acquire);
+    uint64_t duration=(uint64_t)llround(rate*(phase==ASSpatialSelfTestOutputPath?2.0:phase==ASSpatialSelfTestRenderer?4.0:2.5));
+    if (phase>=ASSpatialSelfTestOutputPath && phase<=ASSpatialSelfTestEventIntegration && atomic_load_explicit(&gSelfTestPhaseFrames,memory_order_relaxed)>=duration) {
+        atomic_store_explicit(&gSelfTestPhase,phase+1,memory_order_release); atomic_store_explicit(&gSelfTestPhaseFrames,0,memory_order_release);
+        if (phase+1==ASSpatialSelfTestEventIntegration) { atomic_store_explicit(&gSelfTestNextEventSample,0,memory_order_release); ASStreamSpatialSetSelfTest(gCore,true); }
+        if (phase+1==ASSpatialSelfTestComplete) [AISpatialDiagnostics.sharedDiagnostics recordStage:@"Spatial Self-Test" event:@"self_test_complete" fields:[AISpatialLiveSelfTestStatusSnapshot() copy]];
+    }
+}
+
+__attribute__((visibility("default"))) void AISpatialLiveStartSpatialSelfTest(void) {
+    if (!gCore || atomic_load_explicit(&gSelfTestPhase,memory_order_acquire)!=ASSpatialSelfTestIdle) return;
+    atomic_store_explicit(&gSelfTestPreviousMode,atomic_load_explicit(&gCore->requested_mode,memory_order_acquire),memory_order_release);
+    atomic_store_explicit(&gSelfTestPreviousAccent,ASAccentDetectorIsEnabled(),memory_order_release);
+    ASAccentDetectorSetEnabled(NO); ASAccentDetectorReset(); ASStreamRequestReset(gCore);
+    ASStreamSpatialSetSelfTest(gCore,false);
+    ASStreamSpatialConfigure(gCore,ASConfiguredRoute(),true,(float)[NSUserDefaults.standardUserDefaults doubleForKey:ASConfigIntensity],(float)[NSUserDefaults.standardUserDefaults doubleForKey:ASConfigWidth],(float)[NSUserDefaults.standardUserDefaults doubleForKey:ASConfigDepth],(float)[NSUserDefaults.standardUserDefaults doubleForKey:ASConfigCenterProtection],(float)[NSUserDefaults.standardUserDefaults doubleForKey:ASConfigBassProtection],(float)[NSUserDefaults.standardUserDefaults doubleForKey:ASConfigAntiPhaseLimit]);
+    atomic_store_explicit(&gSelfTestPhaseFrames,0,memory_order_release); atomic_store_explicit(&gSelfTestTotalFrames,0,memory_order_release); atomic_store_explicit(&gSelfTestChangedFrames,0,memory_order_release); atomic_store_explicit(&gSelfTestChangedSquare,0,memory_order_release); ASStoreFloatBits(&gSelfTestChangedPeakBits,0);
+    for(unsigned i=0;i<4;i++) atomic_store_explicit(&gSelfTestRendererFrames[i],0,memory_order_release);
+    atomic_store_explicit(&gSelfTestEventsScheduled,0,memory_order_release); atomic_store_explicit(&gSelfTestNextEventSample,0,memory_order_release); atomic_store_explicit(&gSelfTestEventID,0,memory_order_release);
+    atomic_store_explicit(&gSelfTestPhase,ASSpatialSelfTestOutputPath,memory_order_release);
+    [AISpatialDiagnostics.sharedDiagnostics recordStage:@"Spatial Self-Test" event:@"self_test_start" fields:@{ @"sequence": @[@"Output Path Test", @"Renderer Test", @"Event Integration Test"], @"duration_seconds": @8.5, @"accent_detector": @"bypassed", @"jamesdsp": @"unchanged" }];
+}
+
+__attribute__((visibility("default"))) void AISpatialLiveStopSpatialSelfTest(void) {
+    int phase=atomic_exchange_explicit(&gSelfTestPhase,ASSpatialSelfTestIdle,memory_order_acq_rel); if (phase==ASSpatialSelfTestIdle) return;
+    ASStreamSpatialSetSelfTest(gCore,false); ASStreamRequestReset(gCore); ASAccentDetectorSetEnabled(atomic_load_explicit(&gSelfTestPreviousAccent,memory_order_acquire));
+    AISpatialLiveMode previous=(AISpatialLiveMode)atomic_load_explicit(&gSelfTestPreviousMode,memory_order_acquire); ASConfigureSpatial(gCore,previous==AISpatialLiveModeLive);
+    [AISpatialDiagnostics.sharedDiagnostics recordStage:@"Spatial Self-Test" event:@"self_test_stop" fields:AISpatialLiveSelfTestStatusSnapshot()];
+}
+
+__attribute__((visibility("default"))) NSDictionary *AISpatialLiveSelfTestStatusSnapshot(void) {
+    uint64_t frames=atomic_load_explicit(&gSelfTestTotalFrames,memory_order_relaxed), changed=atomic_load_explicit(&gSelfTestChangedFrames,memory_order_relaxed), square=atomic_load_explicit(&gSelfTestChangedSquare,memory_order_relaxed);
+    NSMutableDictionary *result=[@{ @"phase":@(ASSelfTestPhaseName(atomic_load_explicit(&gSelfTestPhase,memory_order_acquire))), @"phase_frames":@(atomic_load_explicit(&gSelfTestPhaseFrames,memory_order_relaxed)), @"total_frames":@(frames), @"changed_frames":@(changed), @"changed_percent":@(frames?100.0*(double)changed/(double)(frames*2):0), @"delta_rms":@(frames?sqrt((double)square/(double)(frames*2)/1e9):0), @"delta_peak":@(ASLoadFloatBits(&gSelfTestChangedPeakBits)), @"events_scheduled":@(atomic_load_explicit(&gSelfTestEventsScheduled,memory_order_relaxed)), @"stream_epoch":@(gCore?atomic_load_explicit(&gCore->epoch,memory_order_acquire):0), @"actual_renderer":(gCore?ASRouteName(atomic_load_explicit(&gCore->spatial.route,memory_order_acquire)): @"unavailable") } mutableCopy];
+    for(unsigned i=0;i<4;i++) result[[NSString stringWithFormat:@"renderer_%u_frames",i]]=@(atomic_load_explicit(&gSelfTestRendererFrames[i],memory_order_relaxed));
+    return result;
+}
+
+__attribute__((visibility("default"))) void AISpatialLiveRecordTerminalStereo(float *left, float *right, uint32_t frames, double sampleRate) {
+    (void)left; (void)right; (void)sampleRate; atomic_fetch_add_explicit(&gTerminalFrames,frames,memory_order_relaxed); AISpatialDiagnosticsCaptureTerminalPCM(left,right,frames,sampleRate);
+}
+
 __attribute__((visibility("default"))) void AISpatialLiveProcessStereo(float *l, float *r, uint32_t frames, double rate, const AudioTimeStamp *ts) {
     if (ASIsDuplicateCallback(frames, rate, ts)) { atomic_fetch_add_explicit(&gDuplicateCallbackBlocks, 1, memory_order_relaxed); return; }
     atomic_fetch_add_explicit(&gStreamingCallbackBlocks, 1, memory_order_relaxed);
@@ -450,10 +573,50 @@ __attribute__((visibility("default"))) void AISpatialLiveProcessStereo(float *l,
     AISpatialDiagnosticsCapturePCM((AudioBufferList *)&capture, frames, &format, ts);
     double sampleTime = ts && (ts->mFlags & kAudioTimeStampSampleTimeValid) ? ts->mSampleTime : NAN;
     double host = ts && (ts->mFlags & kAudioTimeStampHostTimeValid) ? ASTicksSeconds(ts->mHostTime) : NAN;
-    ASStreamRender(gCore, l, r, frames, rate, sampleTime, host);
+    int selfTestPhase=atomic_load_explicit(&gSelfTestPhase,memory_order_acquire);
+    if (selfTestPhase==ASSpatialSelfTestOutputPath) {
+        ASSelfTestOutputPath(l,r,frames,rate);
+    } else if (selfTestPhase==ASSpatialSelfTestRenderer) {
+        ASSelfTestRenderer(l,r,frames,rate);
+    } else if (selfTestPhase==ASSpatialSelfTestEventIntegration) {
+        ASStreamSpatialSetSelfTest(gCore,true);
+        ASStreamClock clock={0};
+        if (ASStreamReadClock(gCore,&clock) && !clock.reset_pending) {
+            uint64_t next=atomic_load_explicit(&gSelfTestNextEventSample,memory_order_acquire);
+            if (!next || clock.input_cursor>=next) {
+                uint64_t id=atomic_fetch_add_explicit(&gSelfTestEventID,1,memory_order_relaxed)+1;
+                uint64_t start=clock.input_cursor+frames+512, end=start+(uint64_t)llround(rate*.28);
+                ASStreamSpatialEvent event={.event_id=id,.epoch=clock.epoch,.start_sample=start,.end_sample=end,.stem=ASSpatialStemVocal,.motion=ASSpatialMotionArc,.priority=.95f,.intensity=.9f,.direction=1,.attack_seconds=.01f,.release_seconds=.03f,.tail_seconds=.04f};
+                if (ASStreamSpatialSchedule(gCore,&event)) atomic_fetch_add_explicit(&gSelfTestEventsScheduled,1,memory_order_relaxed);
+                atomic_store_explicit(&gSelfTestNextEventSample,start+(uint64_t)llround(rate*.65),memory_order_release);
+            }
+        }
+        ASStreamRender(gCore,l,r,frames,rate,sampleTime,host);
+    } else {
+        ASStreamRender(gCore, l, r, frames, rate, sampleTime, host);
+    }
+    if (selfTestPhase>=ASSpatialSelfTestOutputPath && selfTestPhase<=ASSpatialSelfTestEventIntegration) {
+        atomic_fetch_add_explicit(&gSelfTestPhaseFrames,frames,memory_order_relaxed);
+        ASSelfTestMaybeAdvance(rate);
+    }
     /* Full Trace keeps a bounded post-spatial clip for local A/B export. It
        is disabled for Basic/Detailed and never performs I/O on this callback. */
     AISpatialDiagnosticsCaptureSpatialPCM(l, r, frames, rate);
+    AISpatialDiagnosticsCaptureEventForegroundFromSpatialPCM(l, r, frames, rate);
 }
-__attribute__((visibility("default"))) NSDictionary *AISpatialLiveStatusSnapshot(void) { return gPipeline ? gPipeline.snapshot : @{@"mode_name": @"Original", @"state": @"uninitialized_allocation_failure"}; }
+__attribute__((visibility("default"))) NSDictionary *AISpatialLiveStatusSnapshot(void) {
+    NSDictionary *base=gPipeline ? gPipeline.snapshot : @{@"mode_name": @"Original", @"state": @"uninitialized_allocation_failure"};
+    NSMutableDictionary *result=[base mutableCopy];
+    result[@"self_test"]=AISpatialLiveSelfTestStatusSnapshot();
+    result[@"actual_renderer"]=gCore ? ASRouteName(atomic_load_explicit(&gCore->spatial.route,memory_order_acquire)) : @"unavailable";
+    result[@"terminal_frames"]=@(atomic_load_explicit(&gTerminalFrames,memory_order_relaxed));
+    result[@"spatial_events_activated"]=gCore ? @(atomic_load_explicit(&gCore->spatial.activated,memory_order_relaxed)) : @0;
+    result[@"spatial_events_rendered"]=gCore ? @(atomic_load_explicit(&gCore->spatial.rendered_events,memory_order_relaxed)) : @0;
+    result[@"spatial_events_mixed"]=gCore ? @(atomic_load_explicit(&gCore->spatial.mixed_events,memory_order_relaxed)) : @0;
+    result[@"spatial_events_submitted"]=gCore ? @(atomic_load_explicit(&gCore->spatial.submitted_events,memory_order_relaxed)) : @0;
+    result[@"spatial_events_completed"]=gCore ? @(atomic_load_explicit(&gCore->spatial.completed_events,memory_order_relaxed)) : @0;
+    result[@"spatial_events_stale_epoch"]=gCore ? @(atomic_load_explicit(&gCore->spatial.stale_epoch,memory_order_relaxed)) : @0;
+    result[@"spatial_events_late"]=gCore ? @(atomic_load_explicit(&gCore->spatial.late_events,memory_order_relaxed)) : @0;
+    return result;
+}
 __attribute__((constructor)) static void AISpatialLiveInitialize(void) { mach_timebase_info(&gTimebase); gPipeline = [AISpatialLivePipeline new]; }

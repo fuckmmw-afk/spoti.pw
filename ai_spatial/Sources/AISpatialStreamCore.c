@@ -24,6 +24,9 @@ bool ASStreamInit(ASStreamCore *c) {
     atomic_init(&c->stale_outputs, 0); atomic_init(&c->requested_mode, 0); atomic_init(&c->active_mode, 0);
     atomic_init(&c->spatial_applied, 0);
     atomic_init(&c->spatial_base_applied, 0);
+    atomic_init(&c->spatial_nonzero_delta, 0); atomic_init(&c->spatial_delta_peak_bits, 0);
+    atomic_init(&c->spatial_delta_rms_bits, 0);
+    atomic_init(&c->rendered_stem_frames, 0); atomic_init(&c->rendered_fallback_frames, 0);
     atomic_init(&c->rate_bits, 0);
     atomic_init(&c->spatial.event_head, 0); atomic_init(&c->spatial.event_tail, 0);
     atomic_init(&c->spatial.scheduled, 0); atomic_init(&c->spatial.rejected, 0); atomic_init(&c->spatial.cancelled, 0); atomic_init(&c->spatial.enabled, 0); atomic_init(&c->spatial.route, ASSpatialRouteUniversalStereo);
@@ -122,6 +125,9 @@ void ASStreamRequestReset(ASStreamCore *c) { atomic_fetch_add_explicit(&c->reset
 void ASStreamRequestMode(ASStreamCore *c, int mode) {
     if (mode >= 0 && mode <= 4) atomic_store_explicit(&c->requested_mode, mode, memory_order_release);
 }
+bool ASStreamSpatialLiveRequested(const ASStreamCore *c) {
+    return c && atomic_load_explicit(&c->requested_mode, memory_order_acquire) == 2;
+}
 bool ASStreamPopInput(ASStreamCore *c, ASStreamInput *f) {
     uint64_t tail = atomic_load_explicit(&c->input_tail, memory_order_relaxed);
     if (tail == atomic_load_explicit(&c->input_head, memory_order_acquire)) return false;
@@ -164,6 +170,9 @@ bool ASStreamPopTelemetry(ASStreamCore *c, ASStreamTelemetry *f) {
 static void publish_second(ASStreamCore *c) {
     ASStreamTelemetry *s = &c->second;
     if (!s->input_frames) return;
+    atomic_store_explicit(&c->spatial_delta_peak_bits, ASFloatBits((float)s->spatial_delta_peak), memory_order_release);
+    atomic_store_explicit(&c->spatial_delta_rms_bits,
+        ASFloatBits((float)sqrt(s->spatial_delta_square / (2.0 * s->input_frames))), memory_order_release);
     s->overflow = atomic_load_explicit(&c->overflows, memory_order_relaxed);
     s->underrun = atomic_load_explicit(&c->underruns, memory_order_relaxed);
     s->fallback_transitions = atomic_load_explicit(&c->fallback_transitions, memory_order_relaxed);
@@ -211,6 +220,13 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
         uint64_t bits; memcpy(&bits, &rate, sizeof(bits)); atomic_store(&c->rate_bits, bits);
         atomic_fetch_add_explicit(&c->epoch, 1, memory_order_acq_rel);
         ASStreamSpatialClear(c, atomic_load_explicit(&c->epoch, memory_order_acquire));
+        atomic_store_explicit(&c->spatial_applied, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->spatial_base_applied, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->spatial_nonzero_delta, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->spatial_delta_peak_bits, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->spatial_delta_rms_bits, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->rendered_stem_frames, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->rendered_fallback_frames, 0, memory_order_relaxed);
         // All published frames belong to the previous epoch.  Discard them in
         // O(1) on the render side; the worker's epoch check prevents a stale
         // in-flight prediction from being published after this point.
@@ -252,6 +268,8 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
         if (queue_input) c->input[(head + i) % AS_STREAM_CAPACITY] = (ASStreamInput){epoch, position, in_l, in_r};
         float out_l = in_l, out_r = in_r;
         bool has_stems = false, fallback = false;
+        float reference_l = in_l, reference_r = in_r;
+        bool spatial_frame = false, base_frame = false;
         uint64_t source = position;
         if (mode >= 2 && supported) {
             /* The analysis queue needs a preroll before a stem can be aligned.
@@ -261,6 +279,7 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
             else {
                 source = position - delay;
                 float original_l = c->history_l[source % AS_STREAM_CAPACITY], original_r = c->history_r[source % AS_STREAM_CAPACITY];
+                reference_l = original_l; reference_r = original_r;
                 ASStreamOutput f={0};
                 has_stems = pop_matching(c, epoch, source, &f, &staleDiscardBudget);
                 if (has_stems && (!isfinite(f.vl) || !isfinite(f.vr) || !isfinite(f.il) || !isfinite(f.ir))) has_stems = false;
@@ -307,6 +326,7 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
                         if (ev.stem==ASSpatialStemVocal) { ASSpatialRenderStereo(&cfg,position,f.vl,f.vr,env,&sl,&sr); mix_vl += sl-f.vl; mix_vr += sr-f.vr; }
                         else { ASSpatialRenderStereo(&cfg,position,f.il,f.ir,env,&sl,&sr); mix_il += sl-f.il; mix_ir += sr-f.ir; }
                         atomic_fetch_add_explicit(&c->spatial_applied, 1, memory_order_relaxed);
+                        spatial_frame = true;
                     }
                 }
                 float mix_l = has_stems ? mix_vl * c->vocal_gain + mix_il * c->instrumental_gain : original_l;
@@ -327,6 +347,7 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
                         side*=ASSpatialClamp(gain,1.0f,1.35f);
                         mix_l=mid+side; mix_r=mid-side;
                         atomic_fetch_add_explicit(&c->spatial_base_applied,1,memory_order_relaxed);
+                        base_frame = true;
                     }
                 }
                 out_l = original_l + c->stem_weight * (mix_l - original_l);
@@ -340,6 +361,8 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
                 align = align * align * (3.0f - 2.0f * align);
                 out_l = in_l + align * (out_l - in_l);
                 out_r = in_r + align * (out_r - in_r);
+                reference_l = in_l + align * (reference_l - in_l);
+                reference_r = in_r + align * (reference_r - in_r);
                 c->began_output = true;
                 atomic_store_explicit(&c->output_cursor, source + 1, memory_order_release);
                 if (mode == 2 && align >= 1) {
@@ -352,10 +375,21 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
         if (fallback) atomic_fetch_add_explicit(&c->underruns, 1, memory_order_relaxed);
         c->fallback = fallback;
         l[i] = out_l; r[i] = out_r;
+        if (mode == 2 && has_stems) {
+            float dl=out_l-reference_l, dr=out_r-reference_r;
+            float delta=fmaxf(fabsf(dl),fabsf(dr));
+            if (delta > 1e-6f) atomic_fetch_add_explicit(&c->spatial_nonzero_delta,1,memory_order_relaxed);
+            c->second.spatial_delta_peak=fmax(c->second.spatial_delta_peak,delta);
+            c->second.spatial_delta_square+=(double)dl*dl+(double)dr*dr;
+            c->second.spatial_changed_frames += delta > 1e-6f;
+        }
         ASStreamTelemetry *s = &c->second;
         if (!s->input_frames) { s->epoch = epoch; s->start = position; s->rate = rate; s->mode = mode; s->sample_time = st + i; s->host_seconds = host; }
         s->end = position + 1; s->input_frames++; s->output_frames += c->began_output || mode < 2;
         s->stem_frames += has_stems; s->fallback_frames += fallback;
+        s->spatial_frames += spatial_frame; s->spatial_base_frames += base_frame;
+        if (has_stems) atomic_fetch_add_explicit(&c->rendered_stem_frames,1,memory_order_relaxed);
+        if (fallback) atomic_fetch_add_explicit(&c->rendered_fallback_frames,1,memory_order_relaxed);
         s->input_square += (double)in_l * in_l + (double)in_r * in_r;
         s->input_peak = fmax(s->input_peak, fmax(fabs(in_l), fabs(in_r)));
         s->output_square += (double)out_l * out_l + (double)out_r * out_r;

@@ -39,6 +39,8 @@ typedef struct {
 typedef struct {
     uint64_t epoch, start, end, input_frames, output_frames, stem_frames, fallback_frames;
     uint64_t overflow, underrun, fallback_transitions, discontinuities;
+    uint64_t spatial_frames, spatial_changed_frames, spatial_base_frames;
+    double spatial_delta_square, spatial_delta_peak;
     double rate, input_square, input_peak, output_square, output_peak, error_square;
     double sample_time, host_seconds;
     int mode;
@@ -55,6 +57,10 @@ typedef struct {
     _Atomic(uint64_t) input_dropped, output_dropped, stale_outputs;
     _Atomic(uint64_t) spatial_applied;
     _Atomic(uint64_t) spatial_base_applied;
+    _Atomic(uint64_t) spatial_nonzero_delta;
+    _Atomic(uint32_t) spatial_delta_peak_bits;
+    _Atomic(uint32_t) spatial_delta_rms_bits;
+    _Atomic(uint64_t) rendered_stem_frames, rendered_fallback_frames;
     ASStreamSpatialState spatial;
     _Atomic(int) requested_mode, active_mode;
     _Atomic(uint64_t) rate_bits;
@@ -71,6 +77,7 @@ typedef struct {
     bool reset_pending;
 } ASStreamClock;
 bool ASStreamReadClock(const ASStreamCore *core, ASStreamClock *clock);
+bool ASStreamSpatialLiveRequested(const ASStreamCore *core);
 void ASStreamSpatialConfigure(ASStreamCore *core, ASSpatialRoute route, bool enabled,
                               float intensity, float width, float depth, float center,
                               float bass, float anti_phase);

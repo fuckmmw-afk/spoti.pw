@@ -64,11 +64,31 @@ typedef struct {
 } ASStreamEventTrace;
 enum { AS_TRACE_SCHEDULED, AS_TRACE_ACTIVATED, AS_TRACE_RENDERED, AS_TRACE_MIXED, AS_TRACE_SUBMITTED, AS_TRACE_COMPLETED, AS_TRACE_REJECTED };
 enum { AS_REASON_NONE, AS_REASON_EPOCH, AS_REASON_LATE, AS_REASON_CAPACITY, AS_REASON_DUPLICATE, AS_REASON_NO_STEMS, AS_REASON_NO_DELTA, AS_REASON_DISABLED, AS_REASON_INVALID, AS_REASON_SELF_TEST };
+typedef enum {
+    AS_SELF_TEST_IDLE = 0,
+    AS_SELF_TEST_RUNNING = 1,
+    AS_SELF_TEST_PASSED = 2,
+    AS_SELF_TEST_FAILED = 3,
+    AS_SELF_TEST_CANCELLED = 4,
+} ASOutputSelfTestStatus;
+typedef enum {
+    AS_SELF_TEST_REASON_NONE = 0,
+    AS_SELF_TEST_REASON_EXPLICIT_CANCEL = 1,
+    AS_SELF_TEST_REASON_STREAM_RESET = 2,
+    AS_SELF_TEST_REASON_TIMESTAMP_DISCONTINUITY = 3,
+    AS_SELF_TEST_REASON_RATE_CHANGED = 4,
+    AS_SELF_TEST_REASON_TERMINAL_OUTPUT_MISSING = 5,
+    AS_SELF_TEST_REASON_PHASE_ZERO_FRAMES = 6,
+    AS_SELF_TEST_REASON_RENDERER_ZERO_FRAMES = 7,
+    AS_SELF_TEST_REASON_EVENT_LIFECYCLE_INCOMPLETE = 8,
+} ASOutputSelfTestReason;
 typedef struct {
     _Atomic(int) request, phase;
+    _Atomic(int) status, reason;
     _Atomic(uint64_t) frames, phase_frames[3], changed[3], square_nano[3], renderer_frames[4];
     _Atomic(uint32_t) peak_bits[3];
     _Atomic(uint64_t) scheduled, terminal_frames;
+    _Atomic(uint64_t) baseline_rendered_events, baseline_mixed_events, baseline_submitted_events, baseline_completed_events;
     bool running;
     uint64_t elapsed;
     double rate;
@@ -124,7 +144,10 @@ void ASStreamSpatialClear(ASStreamCore *core, uint64_t epoch);
 void ASStreamSpatialSetSelfTest(ASStreamCore *core, bool enabled);
 void ASStreamStartOutputSelfTest(ASStreamCore *core);
 void ASStreamStopOutputSelfTest(ASStreamCore *core);
+void ASStreamCancelOutputSelfTest(ASStreamCore *core, ASOutputSelfTestReason reason);
 void ASStreamSubmitTerminal(ASStreamCore *core, uint32_t frames);
+const char *ASOutputSelfTestStatusName(int status);
+const char *ASOutputSelfTestReasonName(int reason);
 bool ASStreamPopEventTrace(ASStreamCore *core, ASStreamEventTrace *trace);
 int ASStreamSpatialScheduleReason(ASStreamCore *core, const ASStreamSpatialEvent *event);
 const char *ASStreamTraceStateName(unsigned state);

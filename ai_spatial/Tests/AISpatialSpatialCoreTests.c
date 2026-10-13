@@ -57,6 +57,12 @@ static void renderer_test(void) {
     ASSpatialHRTFState h; ASSpatialHRTFReset(&h);
     ASSpatialHRTFProcess(&h,.4f,.4f,.8f,.5f,1,&l,&r);
     assert(isfinite(l) && isfinite(r) && fabsf(l)<=1 && fabsf(r)<=1);
+    for (unsigned route=0; route<4; route++) {
+        ASSpatialRenderConfig routeConfig; ASSpatialRenderConfigDefault(&routeConfig, (ASSpatialRoute)route);
+        ASSpatialRenderStereo(&routeConfig, (ASSpatialPosition){.8f,-.3f,.2f}, .55f, .12f, .95f, &l, &r);
+        assert(isfinite(l) && isfinite(r));
+        assert(fabsf(l-.55f) > 1e-5f || fabsf(r-.12f) > 1e-5f);
+    }
 }
 static void scheduler_test(double rate) {
     ASEventGate g; ASEventGateInit(&g); ASEventGateSetEpoch(&g,2);

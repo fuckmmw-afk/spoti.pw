@@ -252,8 +252,10 @@ static void ASUIRefreshSpatial(void) {
 - (void)toggleRecording:(id)sender { if (AISpatialDiagnostics.sharedDiagnostics.recording) [AISpatialDiagnostics.sharedDiagnostics stopRecording]; else [AISpatialDiagnostics.sharedDiagnostics startRecording]; [self refresh]; }
 - (void)selfTest:(id)sender {
     NSDictionary *status = AISpatialLiveSelfTestStatusSnapshot();
-    NSString *phase = status[@"phase"] ?: @"Idle";
-    if (![phase isEqualToString:@"Idle"]) { AISpatialLiveStopSpatialSelfTest(); [self refresh]; return; }
+    NSString *result = status[@"status"] ?: status[@"phase"] ?: @"IDLE";
+    if ([result isEqualToString:@"RUNNING"] || ([status[@"phase"] isKindOfClass:NSString.class] && [status[@"phase"] isEqualToString:@"Output Path Test"])) {
+        AISpatialLiveStopSpatialSelfTest(); [self refresh]; return;
+    }
     AISpatialLiveStartSpatialSelfTest();
     [self refresh];
 }

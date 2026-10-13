@@ -15,6 +15,28 @@ const char *ASStreamTraceReasonName(unsigned reason) {
     static const char *names[]={"none","stream_epoch_changed","start_already_played","capacity","duplicate_event","no_synchronized_stem_frames","no_nonzero_foreground_delta","spatial_live_disabled_or_shadow","invalid_event","output_self_test_active"};
     return reason<10?names[reason]:"unknown";
 }
+const char *ASOutputSelfTestStatusName(int status) {
+    switch (status) {
+        case AS_SELF_TEST_RUNNING: return "RUNNING";
+        case AS_SELF_TEST_PASSED: return "PASSED";
+        case AS_SELF_TEST_FAILED: return "FAILED";
+        case AS_SELF_TEST_CANCELLED: return "CANCELLED";
+        default: return "IDLE";
+    }
+}
+const char *ASOutputSelfTestReasonName(int reason) {
+    switch (reason) {
+        case AS_SELF_TEST_REASON_EXPLICIT_CANCEL: return "explicit_cancel";
+        case AS_SELF_TEST_REASON_STREAM_RESET: return "stream_reset";
+        case AS_SELF_TEST_REASON_TIMESTAMP_DISCONTINUITY: return "timestamp_discontinuity";
+        case AS_SELF_TEST_REASON_RATE_CHANGED: return "sample_rate_changed";
+        case AS_SELF_TEST_REASON_TERMINAL_OUTPUT_MISSING: return "terminal_output_missing";
+        case AS_SELF_TEST_REASON_PHASE_ZERO_FRAMES: return "phase_zero_frames";
+        case AS_SELF_TEST_REASON_RENDERER_ZERO_FRAMES: return "renderer_zero_frames";
+        case AS_SELF_TEST_REASON_EVENT_LIFECYCLE_INCOMPLETE: return "event_lifecycle_incomplete";
+        default: return "none";
+    }
+}
 static ASStreamEventTrace eventTrace(ASStreamCore *c, const ASStreamSpatialEvent *e, unsigned state, unsigned reason, uint64_t sample) {
     return (ASStreamEventTrace){e->event_id,e->epoch,sample,e->start_sample,e->end_sample,e->rendered_frames,e->mixed_frames,e->foreground_square,e->delta_square,state,reason,(unsigned)atomic_load(&c->spatial.route)};
 }
@@ -28,6 +50,39 @@ bool ASStreamPopEventTrace(ASStreamCore *c, ASStreamEventTrace *t) {
     if (tail==atomic_load_explicit(&c->trace_head,memory_order_acquire)) return false;
     *t=c->event_trace[tail%256]; atomic_store_explicit(&c->trace_tail,tail+1,memory_order_release); return true;
 }
+static bool ASOutputSelfTestCountersValid(const ASStreamCore *c) {
+    if (!c || !atomic_load_explicit(&c->test.frames, memory_order_acquire)) return false;
+    for (unsigned i = 0; i < 3; i++) {
+        if (!atomic_load_explicit(&c->test.phase_frames[i], memory_order_acquire)) return false;
+    }
+    for (unsigned i = 0; i < 4; i++) {
+        if (!atomic_load_explicit(&c->test.renderer_frames[i], memory_order_acquire)) return false;
+    }
+    return atomic_load_explicit(&c->test.scheduled, memory_order_acquire) > 0 &&
+        atomic_load_explicit(&c->spatial.rendered_events, memory_order_acquire) > atomic_load(&c->test.baseline_rendered_events) &&
+        atomic_load_explicit(&c->spatial.mixed_events, memory_order_acquire) > atomic_load(&c->test.baseline_mixed_events) &&
+        atomic_load_explicit(&c->spatial.submitted_events, memory_order_acquire) > atomic_load(&c->test.baseline_submitted_events) &&
+        atomic_load_explicit(&c->spatial.completed_events, memory_order_acquire) > atomic_load(&c->test.baseline_completed_events);
+}
+static void ASOutputSelfTestFinalize(ASStreamCore *c) {
+    if (!c || atomic_load_explicit(&c->test.status, memory_order_acquire) != AS_SELF_TEST_RUNNING) return;
+    if (atomic_load_explicit(&c->test.phase, memory_order_acquire) != 4) return;
+    if (atomic_load_explicit(&c->test.terminal_frames, memory_order_acquire) <
+        atomic_load_explicit(&c->test.frames, memory_order_acquire)) {
+        return;
+    }
+    int reason = AS_SELF_TEST_REASON_NONE;
+    if (!ASOutputSelfTestCountersValid(c)) {
+        for (unsigned i = 0; i < 3; i++) if (!atomic_load(&c->test.phase_frames[i])) reason = AS_SELF_TEST_REASON_PHASE_ZERO_FRAMES;
+        if (!reason) for (unsigned i = 0; i < 4; i++) if (!atomic_load(&c->test.renderer_frames[i])) reason = AS_SELF_TEST_REASON_RENDERER_ZERO_FRAMES;
+        if (!reason) reason = AS_SELF_TEST_REASON_EVENT_LIFECYCLE_INCOMPLETE;
+        atomic_store_explicit(&c->test.reason, reason, memory_order_release);
+        atomic_store_explicit(&c->test.status, AS_SELF_TEST_FAILED, memory_order_release);
+    } else {
+        atomic_store_explicit(&c->test.reason, AS_SELF_TEST_REASON_NONE, memory_order_release);
+        atomic_store_explicit(&c->test.status, AS_SELF_TEST_PASSED, memory_order_release);
+    }
+}
 void ASStreamSubmitTerminal(ASStreamCore *c, uint32_t frames) {
     atomic_fetch_add(&c->terminal_frames,frames);
     if (c->test.running || atomic_load(&c->test.phase)>0) atomic_fetch_add(&c->test.terminal_frames,frames);
@@ -36,9 +91,30 @@ void ASStreamSubmitTerminal(ASStreamCore *c, uint32_t frames) {
         trace(c,t); atomic_fetch_add(&c->spatial.submitted_events,1);
     }
     c->terminal_pending_count=0;
+    ASOutputSelfTestFinalize(c);
 }
-void ASStreamStartOutputSelfTest(ASStreamCore *c) { if (c) atomic_store_explicit(&c->test.request,1,memory_order_release); }
-void ASStreamStopOutputSelfTest(ASStreamCore *c) { if (c) atomic_store_explicit(&c->test.request,0,memory_order_release); }
+void ASStreamStartOutputSelfTest(ASStreamCore *c) {
+    if (!c) return;
+    atomic_store_explicit(&c->test.baseline_rendered_events, atomic_load(&c->spatial.rendered_events), memory_order_release);
+    atomic_store_explicit(&c->test.baseline_mixed_events, atomic_load(&c->spatial.mixed_events), memory_order_release);
+    atomic_store_explicit(&c->test.baseline_submitted_events, atomic_load(&c->spatial.submitted_events), memory_order_release);
+    atomic_store_explicit(&c->test.baseline_completed_events, atomic_load(&c->spatial.completed_events), memory_order_release);
+    atomic_store_explicit(&c->test.reason, AS_SELF_TEST_REASON_NONE, memory_order_release);
+    atomic_store_explicit(&c->test.status, AS_SELF_TEST_RUNNING, memory_order_release);
+    atomic_store_explicit(&c->test.request, 1, memory_order_release);
+}
+void ASStreamCancelOutputSelfTest(ASStreamCore *c, ASOutputSelfTestReason reason) {
+    if (!c) return;
+    int status = atomic_load_explicit(&c->test.status, memory_order_acquire);
+    if (status == AS_SELF_TEST_RUNNING) {
+        atomic_store_explicit(&c->test.reason, reason, memory_order_release);
+        atomic_store_explicit(&c->test.status, AS_SELF_TEST_CANCELLED, memory_order_release);
+    }
+    atomic_store_explicit(&c->test.request, 0, memory_order_release);
+}
+void ASStreamStopOutputSelfTest(ASStreamCore *c) {
+    ASStreamCancelOutputSelfTest(c, AS_SELF_TEST_REASON_EXPLICIT_CANCEL);
+}
 bool ASStreamInit(ASStreamCore *c) {
     memset(c, 0, sizeof(*c));
     c->input = calloc(AS_STREAM_CAPACITY, sizeof(*c->input));
@@ -73,8 +149,11 @@ bool ASStreamInit(ASStreamCore *c) {
     atomic_init(&c->spatial.intensity_bits, ASFloatBits(.55f)); atomic_init(&c->spatial.width_bits, ASFloatBits(.65f)); atomic_init(&c->spatial.depth_bits, ASFloatBits(.40f));
     atomic_init(&c->spatial.center_bits, ASFloatBits(.75f)); atomic_init(&c->spatial.bass_bits, ASFloatBits(.70f)); atomic_init(&c->spatial.anti_phase_bits, ASFloatBits(.08f));
     atomic_init(&c->trace_head,0); atomic_init(&c->trace_tail,0); atomic_init(&c->trace_dropped,0);
-    atomic_init(&c->test.request,0); atomic_init(&c->test.phase,0); atomic_init(&c->test.frames,0);
-    atomic_init(&c->test.scheduled,0); atomic_init(&c->test.terminal_frames,0); atomic_init(&c->bypassed_frames,0);
+    atomic_init(&c->test.request,0); atomic_init(&c->test.phase,0); atomic_init(&c->test.status,AS_SELF_TEST_IDLE); atomic_init(&c->test.reason,AS_SELF_TEST_REASON_NONE); atomic_init(&c->test.frames,0);
+    atomic_init(&c->test.scheduled,0); atomic_init(&c->test.terminal_frames,0);
+    atomic_init(&c->test.baseline_rendered_events,0); atomic_init(&c->test.baseline_mixed_events,0);
+    atomic_init(&c->test.baseline_submitted_events,0); atomic_init(&c->test.baseline_completed_events,0);
+    atomic_init(&c->bypassed_frames,0);
     for(unsigned i=0;i<4;i++) { atomic_init(&c->renderer_frames[i],0); atomic_init(&c->test.renderer_frames[i],0); }
     for(unsigned i=0;i<3;i++) { atomic_init(&c->test.phase_frames[i],0); atomic_init(&c->test.changed[i],0); atomic_init(&c->test.square_nano[i],0); atomic_init(&c->test.peak_bits[i],0); }
     c->vocal_gain = c->instrumental_gain = 1;
@@ -277,6 +356,13 @@ static float approach(float a, float b, float step) { return a < b ? fminf(b, a 
 void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate, double st, double host) {
     if (!c || !c->input || !l || !r || !n || rate <= 0) return;
     bool testRequested=atomic_load_explicit(&c->test.request,memory_order_acquire)!=0;
+    if (!testRequested && atomic_load_explicit(&c->test.phase, memory_order_acquire)==4 &&
+        atomic_load_explicit(&c->test.status, memory_order_acquire)==AS_SELF_TEST_RUNNING &&
+        atomic_load_explicit(&c->test.terminal_frames, memory_order_acquire) <
+            atomic_load_explicit(&c->test.frames, memory_order_acquire)) {
+        atomic_store_explicit(&c->test.reason, AS_SELF_TEST_REASON_TERMINAL_OUTPUT_MISSING, memory_order_release);
+        atomic_store_explicit(&c->test.status, AS_SELF_TEST_FAILED, memory_order_release);
+    }
     bool testBoundary=testRequested!=c->test.running;
     if (testBoundary) {
         c->test.running=testRequested;
@@ -293,7 +379,10 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
     bool discontinuity = isfinite(st) && c->timestamp_valid && fabs(st - c->expected_sample_time) > 1.5;
     bool boundary = testBoundary || reset != c->handled_reset || c->rate != rate || discontinuity;
     if (c->test.running && (c->test.rate!=rate || (!testBoundary && boundary))) {
-        c->test.running=false; atomic_store(&c->test.request,0); atomic_store(&c->test.phase,0);
+        ASOutputSelfTestReason reason = c->test.rate != rate ? AS_SELF_TEST_REASON_RATE_CHANGED :
+            (discontinuity ? AS_SELF_TEST_REASON_TIMESTAMP_DISCONTINUITY : AS_SELF_TEST_REASON_STREAM_RESET);
+        ASStreamCancelOutputSelfTest(c, reason);
+        c->test.running=false; atomic_store(&c->test.phase,0);
         requested=atomic_load(&c->requested_mode);
     }
     // Every mode-family change starts a new epoch.  This is also what makes
@@ -562,7 +651,8 @@ void ASStreamRender(ASStreamCore *c, float *l, float *r, uint32_t n, double rate
         s->bypassed_frames += !spatial_frame && !base_frame;
         s->fallback_output_frames += fallback;
         s->actual_renderer = atomic_load_explicit(&c->spatial.route, memory_order_relaxed);
-        s->spatial_live = mode == 2 && atomic_load_explicit(&c->spatial.enabled, memory_order_relaxed);
+        s->spatial_live = mode == 2 && atomic_load_explicit(&c->spatial.enabled, memory_order_relaxed) &&
+            (spatial_frame || base_frame);
         if (has_stems) atomic_fetch_add_explicit(&c->rendered_stem_frames,1,memory_order_relaxed);
         if (fallback) atomic_fetch_add_explicit(&c->rendered_fallback_frames,1,memory_order_relaxed);
         s->input_square += (double)in_l * in_l + (double)in_r * in_r;

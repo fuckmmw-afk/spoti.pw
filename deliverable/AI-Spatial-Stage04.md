@@ -79,3 +79,24 @@ Use a safe listening level. A report with `terminal_output_verified=false`
 cannot prove audible output and must not be treated as a Spatial Live fix.
 `spatial-clips/spatial-export.json` gives the exact sample range, WAV metrics,
 changed-sample percentage, renderer/profile identity and event counters.
+
+## Stage 04-B corrective changes
+
+The output self-test now has an explicit `RUNNING`, `PASSED`, `FAILED` or
+`CANCELLED` result. A stream reset, timestamp discontinuity, route-rate change
+or explicit stop records its reason and restores the previous Accent Detector
+state on the diagnostics queue. A run cannot pass unless all three phases have
+non-zero frames, all four renderer instances have processed frames, the event
+path has scheduled/activated/rendered/mixed/submitted/completed transitions,
+and terminal output frames have been received. A phase-A-only run is therefore
+an interrupted test.
+
+Full Trace exports synchronized checkpoints `P0-Input.wav`,
+`P1-AfterSpatial.wav` and `P2-Terminal.wav`, plus `SpatialOnlyDelta.wav` and
+`DownstreamDelta.wav`. `SpatialOnlyDelta` is P1 minus P0; JamesDSP changes are
+reported separately as `DownstreamDelta` and are not used as proof of the
+Spatial Renderer. The status export also reports component `enabled`,
+`running`, `receiving_data` and `blocked_reason` values, the actual renderer
+instance and its processed-frame count. Automatic route detection is recorded
+separately from the selected tuning profile, so a profile name cannot masquerade
+as an active renderer.

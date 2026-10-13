@@ -49,6 +49,10 @@ static NSString *const kAccentEnabledKey = @"pw.chroma.ai-spatial.accent-enabled
     NSUInteger _staleSubmissions;
     uint64_t _resetGeneration;
     uint64_t _minimumValidEpoch;
+    NSUInteger _receivedBlocks;
+    uint64_t _receivedFrames;
+    uint64_t _lastReceivedEpoch;
+    NSString *_blockedReason;
 }
 @end
 
@@ -137,9 +141,25 @@ static NSString *ASAccentSessionID(void) {
 }
 
 - (void)submitEpoch:(uint64_t)epoch windowID:(uint64_t)windowID startSample:(uint64_t)startSample sampleRate:(double)rate frames:(const ASStreamOutput *)frames count:(size_t)count availableSample:(uint64_t)availableSample {
-    if (!frames || !count || count > 96000 || !isfinite(rate) || rate < 8000 || rate > 192000 || !self.enabled) return;
+    if (!self.enabled) {
+        @synchronized(self) { _blockedReason = @"disabled_by_setting_or_self_test"; }
+        return;
+    }
+    if (!frames || !count || count > 96000 || !isfinite(rate) || rate < 8000 || rate > 192000) {
+        @synchronized(self) { _blockedReason = @"invalid_or_empty_stem_buffer"; }
+        return;
+    }
     if (startSample > UINT64_MAX - count) return;
-    for (size_t i = 0; i < count; i++) if (frames[i].epoch != epoch || frames[i].sample != startSample + i) return;
+    for (size_t i = 0; i < count; i++) if (frames[i].epoch != epoch || frames[i].sample != startSample + i) {
+        @synchronized(self) { _blockedReason = @"stem_epoch_or_sample_index_mismatch"; }
+        return;
+    }
+    @synchronized(self) {
+        _receivedBlocks++;
+        _receivedFrames += count;
+        _lastReceivedEpoch = epoch;
+        _blockedReason = nil;
+    }
     double submitted = AISpatialMonotonicSeconds();
     uint64_t generation;
     @synchronized(self) {
@@ -316,7 +336,12 @@ static NSString *ASAccentSessionID(void) {
     @synchronized(self) {
         NSMutableDictionary *types = [NSMutableDictionary dictionary];
         for (NSDictionary *event in _events) { NSString *type = event[@"type"]; types[type] = @([types[type] unsignedIntegerValue] + 1); }
-        return @{ @"enabled": @(_enabled), @"session_id": _sessionID, @"stream_epoch": _hasEpoch ? @(_epoch) : @"none", @"candidates": @(_candidateCount), @"selected": @(_selectedCount), @"rejected": @(_rejectedCount), @"cancelled_stale_events": @(_cancelledEvents), @"stale_submissions": @(_staleSubmissions), @"dropped_analysis_blocks": @(_droppedBlocks), @"analysis_queue_depth": @(_pending), @"processing_avg_ms": _processingCount ? @(_processingTotal / _processingCount) : @0, @"density_selected_last_60s": @(_eventGate.density_count), @"type_distribution": types, @"manual_labels": [_manualLabels copy], @"policy": @{ @"target_density_per_minute": @"up to 10 across both stems; sliding monotonic 60 seconds; retained across epochs", @"minimum_interval_seconds": @0.35, @"max_selected_per_minute": @10, @"selection": @"rarity + contrast + novelty + context; repeated hits suppressed" } };
+        BOOL receiving = _receivedFrames > 0;
+        BOOL running = _enabled && (_pending > 0 || receiving);
+        NSString *blocked = _blockedReason;
+        if (!blocked && !_enabled) blocked = @"disabled_by_setting_or_self_test";
+        if (!blocked && !receiving) blocked = @"waiting_for_synchronized_stem_pcm";
+        return @{ @"enabled": @(_enabled), @"running": @(running), @"receiving_data": @(receiving), @"blocked_reason": blocked ?: [NSNull null], @"received_blocks": @(_receivedBlocks), @"received_frames": @(_receivedFrames), @"last_received_epoch": @(_lastReceivedEpoch), @"session_id": _sessionID, @"stream_epoch": _hasEpoch ? @(_epoch) : @"none", @"candidates": @(_candidateCount), @"selected": @(_selectedCount), @"rejected": @(_rejectedCount), @"cancelled_stale_events": @(_cancelledEvents), @"stale_submissions": @(_staleSubmissions), @"dropped_analysis_blocks": @(_droppedBlocks), @"analysis_queue_depth": @(_pending), @"processing_avg_ms": _processingCount ? @(_processingTotal / _processingCount) : @0, @"density_selected_last_60s": @(_eventGate.density_count), @"type_distribution": types, @"manual_labels": [_manualLabels copy], @"policy": @{ @"target_density_per_minute": @"up to 10 across both stems; sliding monotonic 60 seconds; retained across epochs", @"minimum_interval_seconds": @0.35, @"max_selected_per_minute": @10, @"selection": @"rarity + contrast + novelty + context; repeated hits suppressed" } };
     }
 }
 

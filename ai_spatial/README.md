@@ -49,6 +49,13 @@ From **AI Spatial → Diagnostics**, press **Run Spatial Output Self-Test (A →
 
 The report records changed frames, output delta RMS/peak, frames processed by each renderer, event lifecycle counts, current stream epoch and actual renderer. If A produces no terminal PCM change, detector thresholds cannot fix the output path; inspect the bridge hook and `terminal_output_verified` in `spatial-clips/spatial-export.json`.
 
+An interrupted run is reported as `FAILED` or `CANCELLED` with a reason.
+Phase A alone is never a pass: all three phases, all four renderer frame
+counters, the complete scheduler lifecycle and terminal output frames are
+required. Full Trace keeps synchronized P0 (input), P1 (post-Spatial) and P2
+(post-JamesDSP terminal) checkpoints and reports SpatialOnlyDelta separately
+from downstream JamesDSP changes.
+
 ## Offline test
 
 **Test first 30 seconds** reads the first 30 seconds (or the entire shorter file), converts to 44.1 kHz float32 stereo, and runs 2-second windows (2048-point periodic-Hann STFT, 441-sample hop, reflected boundaries) with the model's fixed `[1,2050,201,2]` contract. Dimension 1 interleaves the two channels for each frequency bin and dimension 3 stores the real/imaginary pair. The model output is decoded as a complex vocal spectrum; the packed `vDSP_fft_zrip` inverse is scaled by `1/(2N)` and its squared-Hann weight is removed before overlap blending. `instrumental` is then computed as the original PCM minus the overlap-added vocals. The trace measures input preparation, windowing, STFT, Core ML input/output, inverse STFT, residual reconstruction, overlap blending, per-second levels and the RMS difference between `vocals + instrumental` and the source.

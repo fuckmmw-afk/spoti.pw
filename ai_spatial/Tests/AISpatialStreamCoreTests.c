@@ -222,6 +222,31 @@ static void test_live_base_scene_changes_stem_mix_without_event(void) {
     ASStreamDestroy(&core);
 }
 
+static void test_spatial_off_preserves_p0_to_p1(void) {
+    ASStreamCore core;
+    assert(ASStreamInit(&core));
+    ASStreamRequestMode(&core, 2);
+    ASStreamSpatialConfigure(&core, ASSpatialRouteUniversalStereo, false, .9f, .95f, .5f, .55f, .8f, .08f);
+    float firstL[1] = {.3f}, firstR[1] = {.2f};
+    ASStreamRender(&core, firstL, firstR, 1, 44100, NAN, NAN);
+    uint64_t epoch = atomic_load(&core.epoch);
+    ASStreamOutput stems[256];
+    for (size_t i = 0; i < 256; i++) stems[i] = (ASStreamOutput){epoch, 3, i, .20f, .10f, .10f, .10f};
+    assert(ASStreamPushOutput(&core, stems, 256));
+    const size_t delay = (size_t)llround(AS_STREAM_DELAY_SECONDS * 44100);
+    float left[512], right[512]; size_t position=1;
+    while (position < delay + 128) {
+        size_t count=(delay+128-position)>512?512:delay+128-position;
+        for (size_t i=0;i<count;i++){left[i]=.3f;right[i]=.2f;}
+        ASStreamRender(&core,left,right,(uint32_t)count,44100,NAN,NAN);
+        for (size_t i=0;i<count;i++) assert(left[i]==.3f && right[i]==.2f);
+        position+=count;
+    }
+    assert(atomic_load(&core.spatial_base_applied)==0);
+    assert(atomic_load(&core.spatial_applied)==0);
+    ASStreamDestroy(&core);
+}
+
 static void test_spatial_self_test_scheduler_path(void) {
     ASStreamCore core;
     assert(ASStreamInit(&core));
@@ -269,6 +294,8 @@ static void test_output_self_test_path(void) {
     }
     assert(changed);
     assert(atomic_load(&core.test.phase)==4);
+    assert(atomic_load(&core.test.status)==AS_SELF_TEST_PASSED);
+    assert(atomic_load(&core.test.reason)==AS_SELF_TEST_REASON_NONE);
     assert(atomic_load(&core.test.changed[0])>0);
     for(unsigned route=0;route<4;route++) assert(atomic_load(&core.test.renderer_frames[route])>0);
     assert(atomic_load(&core.test.scheduled)>0);
@@ -276,6 +303,34 @@ static void test_output_self_test_path(void) {
     assert(atomic_load(&core.spatial.mixed_events)>0);
     assert(atomic_load(&core.spatial.submitted_events)>0);
     assert(atomic_load(&core.test.terminal_frames)==total);
+    ASStreamDestroy(&core);
+}
+
+static void test_output_self_test_cancel_and_restart(void) {
+    ASStreamCore core;
+    assert(ASStreamInit(&core));
+    float left[256], right[256];
+    ASStreamStartOutputSelfTest(&core);
+    for (size_t i = 0; i < 4; i++) {
+        for (size_t j = 0; j < 256; j++) left[j] = right[j] = .2f;
+        ASStreamRender(&core, left, right, 256, 44100.0, NAN, NAN);
+    }
+    assert(atomic_load(&core.test.status)==AS_SELF_TEST_RUNNING);
+    ASStreamRequestReset(&core);
+    ASStreamRender(&core, left, right, 256, 44100.0, NAN, NAN);
+    assert(atomic_load(&core.test.status)==AS_SELF_TEST_CANCELLED);
+    assert(atomic_load(&core.test.reason)==AS_SELF_TEST_REASON_STREAM_RESET);
+    assert(atomic_load(&core.test.phase)==0);
+
+    /* A new run starts from a clean state after the cancelled epoch. */
+    ASStreamStartOutputSelfTest(&core);
+    ASStreamRender(&core, left, right, 256, 44100.0, NAN, NAN);
+    assert(atomic_load(&core.test.status)==AS_SELF_TEST_RUNNING);
+    assert(atomic_load(&core.test.phase)==1);
+    ASStreamStopOutputSelfTest(&core);
+    ASStreamRender(&core, left, right, 256, 44100.0, NAN, NAN);
+    assert(atomic_load(&core.test.status)==AS_SELF_TEST_CANCELLED);
+    assert(atomic_load(&core.test.reason)==AS_SELF_TEST_REASON_EXPLICIT_CANCEL);
     ASStreamDestroy(&core);
 }
 
@@ -289,8 +344,10 @@ int main(void) {
     test_bounded_input_overflow();
     test_spatial_event_is_future_stem_delta();
     test_live_base_scene_changes_stem_mix_without_event();
+    test_spatial_off_preserves_p0_to_p1();
     test_spatial_self_test_scheduler_path();
     test_output_self_test_path();
+    test_output_self_test_cancel_and_restart();
     puts("AISpatialStreamCoreTests: ok");
     return 0;
 }

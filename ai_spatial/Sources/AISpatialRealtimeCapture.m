@@ -117,6 +117,13 @@ static OSStatus ASRendered(void *refCon, AudioUnitRenderActionFlags *flags, cons
                         gCaptureFormat.mBitsPerChannel == 32 && data->mNumberBuffers >= 2 &&
                         data->mBuffers[0].mData && data->mBuffers[1].mData;
     if (process && (!bridgeActive || !bridgeActive()) && splitFloat32) {
+        /* The compatibility observer is already at the terminal RemoteIO
+           buffer, so its downstream delay is zero. Preserve the input before
+           the in-place Spatial call for the synchronized fallback export. */
+        AISpatialDiagnosticsCaptureOriginalPCM((const float *)data->mBuffers[0].mData,
+                                               (const float *)data->mBuffers[1].mData,
+                                               frames, gCaptureFormat.mSampleRate,
+                                               timestamp && (timestamp->mFlags & kAudioTimeStampSampleTimeValid) ? (uint64_t)timestamp->mSampleTime : 0);
         process((float *)data->mBuffers[0].mData, (float *)data->mBuffers[1].mData, frames, gCaptureFormat.mSampleRate, timestamp);
         AISpatialLiveRecordTerminalStereo((float *)data->mBuffers[0].mData,
                                            (float *)data->mBuffers[1].mData,

@@ -56,9 +56,16 @@ static OSStatus (*gAudioOutputUnitStart)(AudioUnit);
 typedef void (*AISpatialLiveProcessFn)(float *left, float *right, UInt32 frames, double sampleRate, const AudioTimeStamp *timestamp);
 typedef void (*AISpatialLiveResetFn)(double sampleRate);
 typedef void (*AISpatialTerminalCaptureFn)(float *left, float *right, UInt32 frames, double sampleRate);
+typedef void (*AISpatialSynchronizedOutputFn)(const float *originalLeft, const float *originalRight,
+                                               const float *preLeft, const float *preRight,
+                                               const float *outputLeft, const float *outputRight,
+                                               const float *foregroundLeft, const float *foregroundRight,
+                                               UInt32 frames, double sampleRate, uint64_t outputSample,
+                                               uint64_t epoch, UInt32 downstreamDelay);
 static _Atomic(AISpatialLiveProcessFn) gAISpatialLiveProcess;
 static _Atomic(AISpatialLiveResetFn) gAISpatialLiveReset;
 static _Atomic(AISpatialTerminalCaptureFn) gAISpatialTerminalCapture;
+static _Atomic(AISpatialSynchronizedOutputFn) gAISpatialSynchronizedOutput;
 // The AI tweak can use its own post-render observer as a compatibility
 // fallback when this bridge was not loaded or Spotify no longer imports
 // AudioOutputUnitStart.  Export a small readiness query so the two observers
@@ -102,6 +109,11 @@ static void resolveAISpatialBridge(void) {
         terminal = (AISpatialTerminalCaptureFn)resolveAISpatialSymbol("AISpatialLiveRecordTerminalStereo");
         if (!terminal) terminal = (AISpatialTerminalCaptureFn)resolveAISpatialSymbol("AISpatialDiagnosticsCaptureTerminalPCM");
         if (terminal) atomic_store_explicit(&gAISpatialTerminalCapture, terminal, memory_order_release);
+    }
+    AISpatialSynchronizedOutputFn synchronized = atomic_load_explicit(&gAISpatialSynchronizedOutput, memory_order_acquire);
+    if (!synchronized) {
+        synchronized = (AISpatialSynchronizedOutputFn)resolveAISpatialSymbol("AISpatialDiagnosticsCaptureSynchronizedOutput");
+        if (synchronized) atomic_store_explicit(&gAISpatialSynchronizedOutput, synchronized, memory_order_release);
     }
 }
 // The JamesDSP setters rebuild filter state.  Reapplying them from the polling timer
@@ -250,6 +262,40 @@ static inline void writeSample(void *data, UInt32 index, float value, UInt32 byt
 }
 
 static float gLeft[4096], gRight[4096];
+enum { kSpatialAlignCapacity = 16384, kSpatialAlignMask = kSpatialAlignCapacity - 1 };
+static float gSpatialOriginal[2][kSpatialAlignCapacity], gSpatialPre[2][kSpatialAlignCapacity];
+static uint64_t gSpatialTags[kSpatialAlignCapacity];
+static float gSpatialAlignedOriginal[2][4096], gSpatialAlignedPre[2][4096];
+static uint64_t gSpatialInputCursor, gSpatialEpoch;
+static double gSpatialCursorRate;
+
+static uint64_t spatialInputStart(const AudioTimeStamp *timestamp, UInt32 frames, double rate) {
+    BOOL valid=timestamp && (timestamp->mFlags & kAudioTimeStampSampleTimeValid) && isfinite(timestamp->mSampleTime) && timestamp->mSampleTime>=0;
+    uint64_t start=valid ? (uint64_t)timestamp->mSampleTime : gSpatialInputCursor;
+    if (gSpatialCursorRate!=rate || (gSpatialInputCursor && start!=gSpatialInputCursor)) {
+        memset(gSpatialTags,0,sizeof(gSpatialTags)); gSpatialEpoch++; gSpatialInputCursor=start; gSpatialCursorRate=rate;
+    }
+    return start;
+}
+static void spatialStoreOriginal(uint64_t start, const float *left, const float *right, UInt32 frames) {
+    for(UInt32 i=0;i<frames;i++){ uint64_t sample=start+i; size_t at=(size_t)sample&kSpatialAlignMask; gSpatialTags[at]=sample+1; gSpatialOriginal[0][at]=left[i]; gSpatialOriginal[1][at]=right[i]; }
+}
+static void spatialStorePre(uint64_t start, const float *left, const float *right, UInt32 frames) {
+    for(UInt32 i=0;i<frames;i++){ uint64_t sample=start+i; size_t at=(size_t)sample&kSpatialAlignMask; if(gSpatialTags[at]==sample+1){gSpatialPre[0][at]=left[i];gSpatialPre[1][at]=right[i];} }
+}
+static void spatialCaptureAligned(uint64_t outputStart, const float *left, const float *right, UInt32 frames, double rate, UInt32 delay) {
+    AISpatialSynchronizedOutputFn synchronized=atomic_load_explicit(&gAISpatialSynchronizedOutput,memory_order_acquire);
+    if(!synchronized || !frames) return;
+    for(UInt32 done=0;done<frames;) {
+        UInt32 count=MIN(frames-done,(UInt32)4096), valid=0;
+        uint64_t blockOutput=outputStart+done;
+        UInt32 skip=blockOutput<delay ? MIN(count,delay-(UInt32)blockOutput) : 0;
+        uint64_t outputSample=blockOutput+skip, sourceStart=outputSample>=delay?outputSample-delay:0;
+        while(valid<count-skip) { uint64_t sample=sourceStart+valid; if(gSpatialTags[(size_t)sample&kSpatialAlignMask]!=sample+1) break; size_t at=(size_t)sample&kSpatialAlignMask; gSpatialAlignedOriginal[0][valid]=gSpatialOriginal[0][at]; gSpatialAlignedOriginal[1][valid]=gSpatialOriginal[1][at]; gSpatialAlignedPre[0][valid]=gSpatialPre[0][at]; gSpatialAlignedPre[1][valid]=gSpatialPre[1][at]; valid++; }
+        if(valid) synchronized(gSpatialAlignedOriginal[0],gSpatialAlignedOriginal[1],gSpatialAlignedPre[0],gSpatialAlignedPre[1],left+done+skip,right+done+skip,NULL,NULL,valid,rate,outputSample,gSpatialEpoch,delay);
+        done+=count;
+    }
+}
 
 static BOOL processBuffers(SGDSPEngine *engine, AudioUnitRenderActionFlags *flags, UInt32 frames, AudioBufferList *data, const AudioTimeStamp *timestamp) {
     uint64_t layout = atomic_load_explicit(&gLayout, memory_order_relaxed);
@@ -271,18 +317,26 @@ static BOOL processBuffers(SGDSPEngine *engine, AudioUnitRenderActionFlags *flag
 
     BOOL silent = (*flags & kAudioUnitRenderAction_OutputIsSilence) != 0;
     BOOL loud = NO;
+    uint64_t inputStart=spatialInputStart(timestamp,frames,sampleRate);
     if (split && isFloat && bytes == 4 && channels >= 2) {
         float *left = data->mBuffers[0].mData, *right = data->mBuffers[1].mData;
         if (silent) {
             memset(left, 0, frames * sizeof(float));
             memset(right, 0, frames * sizeof(float));
         }
+        spatialStoreOriginal(inputStart,left,right,frames);
         AISpatialLiveProcessFn aiProcess = atomic_load_explicit(&gAISpatialLiveProcess, memory_order_acquire);
         if (aiProcess) aiProcess(left, right, frames, sampleRate, timestamp);
+        spatialStorePre(inputStart,left,right,frames);
         if (engine) SGDSPEngineProcess(engine, left, right, frames);
+        spatialCaptureAligned(inputStart,left,right,frames,sampleRate,engine ? kSGDSPEngineBlock : 0);
         AISpatialTerminalCaptureFn terminal = atomic_load_explicit(&gAISpatialTerminalCapture, memory_order_acquire);
         if (terminal) terminal(left, right, frames, sampleRate);
-        loud = !silent;
+        /* Spatial Live and the bounded output self-test may write a non-zero
+           block even when RemoteIO marked the input silent.  Keep the output
+           flag consistent with the mutated PCM so the HAL does not discard
+           the controlled test signal (or a valid recovered frame). */
+        loud = !silent || aiProcess != NULL;
     } else {
         for (UInt32 done = 0; done < frames;) {
             UInt32 count = MIN(frames - done, (UInt32)4096);
@@ -294,6 +348,8 @@ static BOOL processBuffers(SGDSPEngine *engine, AudioUnitRenderActionFlags *flag
                 gLeft[i] = silent ? 0 : readSample(first, at, bytes, isFloat, fraction);
                 gRight[i] = silent ? 0 : readSample(second, at + secondOffset, bytes, isFloat, fraction);
             }
+            uint64_t chunkStart=inputStart+done;
+            spatialStoreOriginal(chunkStart,gLeft,gRight,count);
             AISpatialLiveProcessFn aiProcess = atomic_load_explicit(&gAISpatialLiveProcess, memory_order_acquire);
             if (aiProcess) {
                 AudioTimeStamp chunkTimestamp;
@@ -305,10 +361,12 @@ static BOOL processBuffers(SGDSPEngine *engine, AudioUnitRenderActionFlags *flag
                 }
                 aiProcess(gLeft, gRight, count, sampleRate, chunkTimestampPointer);
             }
+            spatialStorePre(chunkStart,gLeft,gRight,count);
             if (engine) SGDSPEngineProcess(engine, gLeft, gRight, count);
+            spatialCaptureAligned(chunkStart,gLeft,gRight,count,sampleRate,engine ? kSGDSPEngineBlock : 0);
             AISpatialTerminalCaptureFn terminal = atomic_load_explicit(&gAISpatialTerminalCapture, memory_order_acquire);
             if (terminal) terminal(gLeft, gRight, count, sampleRate);
-            loud = loud || !silent;
+            loud = loud || !silent || aiProcess != NULL;
             void *firstOut = data->mBuffers[0].mData;
             void *secondOut = split && channels > 1 ? data->mBuffers[1].mData : firstOut;
             for (UInt32 i = 0; i < count; i++) {
@@ -323,6 +381,7 @@ static BOOL processBuffers(SGDSPEngine *engine, AudioUnitRenderActionFlags *flag
             done += count;
         }
     }
+    gSpatialInputCursor=inputStart+frames;
     if (loud) *flags &= ~kAudioUnitRenderAction_OutputIsSilence;
     return YES;
 }

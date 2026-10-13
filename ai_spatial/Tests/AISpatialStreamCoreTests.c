@@ -244,9 +244,38 @@ static void test_spatial_self_test_scheduler_path(void) {
     assert(atomic_load(&core.spatial.activated)==1);
     assert(atomic_load(&core.spatial.rendered_events)==1);
     assert(atomic_load(&core.spatial.mixed_events)==1);
+    ASStreamSubmitTerminal(&core, 12 * 64);
     assert(atomic_load(&core.spatial.submitted_events)==1);
     assert(atomic_load(&core.spatial.completed_events)==1);
     assert(atomic_load(&core.spatial_applied)>0);
+    ASStreamDestroy(&core);
+}
+
+static void test_output_self_test_path(void) {
+    ASStreamCore core;
+    assert(ASStreamInit(&core));
+    ASStreamSpatialConfigure(&core, ASSpatialRouteUniversalStereo, true, .8f, .9f, .4f, .7f, .8f, .08f);
+    ASStreamStartOutputSelfTest(&core);
+    float left[512], right[512];
+    const size_t total=(size_t)llround(8.5*44100.0);
+    size_t rendered=0; bool changed=false;
+    while (rendered<total) {
+        size_t n=total-rendered>512?512:total-rendered;
+        for(size_t i=0;i<n;i++) { left[i]=.25f; right[i]=.12f; }
+        ASStreamRender(&core,left,right,(uint32_t)n,44100,NAN,NAN);
+        for(size_t i=0;i<n;i++) if(fabsf(left[i]-.25f)>1e-5f || fabsf(right[i]-.12f)>1e-5f) changed=true;
+        ASStreamSubmitTerminal(&core,(uint32_t)n);
+        rendered+=n;
+    }
+    assert(changed);
+    assert(atomic_load(&core.test.phase)==4);
+    assert(atomic_load(&core.test.changed[0])>0);
+    for(unsigned route=0;route<4;route++) assert(atomic_load(&core.test.renderer_frames[route])>0);
+    assert(atomic_load(&core.test.scheduled)>0);
+    assert(atomic_load(&core.spatial.rendered_events)>0);
+    assert(atomic_load(&core.spatial.mixed_events)>0);
+    assert(atomic_load(&core.spatial.submitted_events)>0);
+    assert(atomic_load(&core.test.terminal_frames)==total);
     ASStreamDestroy(&core);
 }
 
@@ -261,6 +290,7 @@ int main(void) {
     test_spatial_event_is_future_stem_delta();
     test_live_base_scene_changes_stem_mix_without_event();
     test_spatial_self_test_scheduler_path();
+    test_output_self_test_path();
     puts("AISpatialStreamCoreTests: ok");
     return 0;
 }

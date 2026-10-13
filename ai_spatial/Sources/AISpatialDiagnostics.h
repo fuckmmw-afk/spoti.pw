@@ -21,12 +21,19 @@ FOUNDATION_EXPORT void AISpatialDiagnosticsSetRealtimeCaptureHookAvailable(BOOL 
 FOUNDATION_EXPORT void AISpatialDiagnosticsCapturePCM(const AudioBufferList *data, UInt32 frames,
                                                        const AudioStreamBasicDescription *format,
                                                        const AudioTimeStamp *timestamp);
+FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureOriginalPCM(const float *left, const float *right,
+                                                               UInt32 frames, double sampleRate, uint64_t sampleStart);
 FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureSpatialPCM(const float *left, const float *right,
                                                               UInt32 frames, double sampleRate);
 // Captures the same buffer after the JamesDSP bridge has finished processing.
 // This is the terminal audible PCM path used for Spatial.wav when available.
 FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureTerminalPCM(const float *left, const float *right,
                                                                UInt32 frames, double sampleRate);
+FOUNDATION_EXPORT BOOL AISpatialDiagnosticsSynchronizedOutputActive(void);
+FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureSynchronizedOutput(const float *originalLeft, const float *originalRight,
+    const float *preLeft, const float *preRight, const float *outputLeft, const float *outputRight,
+    const float *foregroundLeft, const float *foregroundRight, UInt32 frames, double sampleRate,
+    uint64_t outputSample, uint64_t epoch, UInt32 downstreamDelay);
 FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureEventForegroundPCM(const float *left, const float *right,
                                                                       UInt32 frames, double sampleRate);
 FOUNDATION_EXPORT void AISpatialDiagnosticsCaptureEventForegroundDeltaPCM(const float *originalLeft, const float *originalRight,

@@ -25,13 +25,17 @@ typedef struct {
     float attack_seconds, release_seconds, tail_seconds;
     /* Render-owner lifecycle bits.  They are deliberately part of the event
        copy so the producer never touches render state after publication. */
-    uint8_t lifecycle_rendered, lifecycle_mixed;
+    uint8_t lifecycle_rendered, lifecycle_mixed, lifecycle_activated;
+    uint64_t rendered_frames, mixed_frames;
+    double foreground_square, delta_square;
 } ASStreamSpatialEvent;
 typedef struct {
     ASStreamSpatialEvent pending[AS_STREAM_SPATIAL_SLOTS];
     _Atomic(uint64_t) event_head, event_tail;
     ASStreamSpatialEvent active[8]; // render-owned; producer never modifies
     size_t active_count;
+    ASStreamSpatialEvent waiting[AS_STREAM_SPATIAL_SLOTS];
+    size_t waiting_count;
     uint64_t active_epoch;
     _Atomic(uint64_t) scheduled, rejected, cancelled;
     _Atomic(uint64_t) activated, rendered_events, mixed_events, submitted_events, completed_events;
@@ -46,11 +50,29 @@ typedef struct {
     uint64_t epoch, start, end, input_frames, output_frames, stem_frames, fallback_frames;
     uint64_t overflow, underrun, fallback_transitions, discontinuities;
     uint64_t spatial_frames, spatial_changed_frames, spatial_base_frames;
+    uint64_t spatial_renderer_frames, bypassed_frames, fallback_output_frames;
     double spatial_delta_square, spatial_delta_peak;
     double rate, input_square, input_peak, output_square, output_peak, error_square;
     double sample_time, host_seconds;
-    int mode;
+    int mode, actual_renderer;
+    bool spatial_live;
 } ASStreamTelemetry;
+typedef struct {
+    uint64_t event_id, epoch, sample, start, end, rendered_frames, mixed_frames;
+    double foreground_square, delta_square;
+    unsigned state, reason, renderer;
+} ASStreamEventTrace;
+enum { AS_TRACE_SCHEDULED, AS_TRACE_ACTIVATED, AS_TRACE_RENDERED, AS_TRACE_MIXED, AS_TRACE_SUBMITTED, AS_TRACE_COMPLETED, AS_TRACE_REJECTED };
+enum { AS_REASON_NONE, AS_REASON_EPOCH, AS_REASON_LATE, AS_REASON_CAPACITY, AS_REASON_DUPLICATE, AS_REASON_NO_STEMS, AS_REASON_NO_DELTA, AS_REASON_DISABLED, AS_REASON_INVALID, AS_REASON_SELF_TEST };
+typedef struct {
+    _Atomic(int) request, phase;
+    _Atomic(uint64_t) frames, phase_frames[3], changed[3], square_nano[3], renderer_frames[4];
+    _Atomic(uint32_t) peak_bits[3];
+    _Atomic(uint64_t) scheduled, terminal_frames;
+    bool running;
+    uint64_t elapsed;
+    double rate;
+} ASOutputSelfTest;
 typedef struct {
     ASStreamInput *input;
     ASStreamOutput *output;
@@ -69,6 +91,12 @@ typedef struct {
     _Atomic(uint64_t) rendered_stem_frames, rendered_fallback_frames;
     _Atomic(uint64_t) terminal_frames;
     ASStreamSpatialState spatial;
+    ASOutputSelfTest test;
+    ASStreamEventTrace event_trace[256], terminal_pending[16];
+    _Atomic(uint64_t) trace_head, trace_tail, trace_dropped;
+    size_t terminal_pending_count;
+    _Atomic(uint64_t) renderer_frames[4], bypassed_frames;
+    float *reference_left, *reference_right, *foreground_left, *foreground_right; /* optional callback-owned taps */
     _Atomic(int) requested_mode, active_mode;
     _Atomic(uint64_t) rate_bits;
     // Render-owned state below. Other threads request boundaries, never clear it.
@@ -94,6 +122,13 @@ void ASStreamSpatialSetMaxActive(ASStreamCore *core, unsigned max_active);
 bool ASStreamSpatialSchedule(ASStreamCore *core, const ASStreamSpatialEvent *event);
 void ASStreamSpatialClear(ASStreamCore *core, uint64_t epoch);
 void ASStreamSpatialSetSelfTest(ASStreamCore *core, bool enabled);
+void ASStreamStartOutputSelfTest(ASStreamCore *core);
+void ASStreamStopOutputSelfTest(ASStreamCore *core);
+void ASStreamSubmitTerminal(ASStreamCore *core, uint32_t frames);
+bool ASStreamPopEventTrace(ASStreamCore *core, ASStreamEventTrace *trace);
+int ASStreamSpatialScheduleReason(ASStreamCore *core, const ASStreamSpatialEvent *event);
+const char *ASStreamTraceStateName(unsigned state);
+const char *ASStreamTraceReasonName(unsigned reason);
 bool ASStreamInit(ASStreamCore *core);
 void ASStreamDestroy(ASStreamCore *core); // only after both owners have stopped
 void ASStreamRequestReset(ASStreamCore *core);

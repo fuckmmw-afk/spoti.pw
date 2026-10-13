@@ -1,9 +1,12 @@
 #import "AISpatialDiagnostics.h"
 #import "AISpatialZip.h"
+#import "AISpatialConfig.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <mach/mach.h>
 #import <mach/mach_time.h>
 #include <stdatomic.h>
+
+FOUNDATION_EXPORT NSDictionary *AISpatialLiveStatusSnapshot(void) __attribute__((weak_import));
 
 NSNotificationName const AISpatialDiagnosticsDidChangeNotification = @"AISpatialDiagnosticsDidChangeNotification";
 static const NSUInteger ASQueueEvents = 256, ASQueueBytes = 16 * 1024 * 1024;
@@ -41,6 +44,10 @@ static _Atomic uint32_t gSpatialForegroundCursor;
 static _Atomic uint32_t gSpatialClipRateBits;
 static _Atomic uint64_t gSpatialClipBaseSample;
 static _Atomic BOOL gSpatialClipHasBaseSample;
+static _Atomic uint64_t gSpatialClipEpoch;
+static _Atomic uint32_t gSpatialDownstreamDelay;
+static _Atomic BOOL gSpatialClipClosed;
+static _Atomic BOOL gSpatialSynchronizedActive;
 
 static void ASCaptureClipOriginal(const float *left, const float *right, UInt32 frames, uint64_t sampleStart) {
     if (!left || !right || !atomic_load_explicit(&gCaptureRawEnabled, memory_order_relaxed)) return;
@@ -87,8 +94,47 @@ void AISpatialDiagnosticsCaptureSpatialPCM(const float *left, const float *right
     ASCaptureAlignedClip(gSpatialPreClip,&gSpatialPreCursor,left,right,frames,sampleRate);
 }
 
+void AISpatialDiagnosticsCaptureOriginalPCM(const float *left, const float *right, UInt32 frames, double sampleRate, uint64_t sampleStart) {
+    (void)sampleRate;
+    ASCaptureClipOriginal(left,right,frames,sampleStart);
+}
+
 void AISpatialDiagnosticsCaptureTerminalPCM(const float *left, const float *right, UInt32 frames, double sampleRate) {
     ASCaptureAlignedClip(gSpatialTerminalClip,&gSpatialTerminalCursor,left,right,frames,sampleRate);
+}
+BOOL AISpatialDiagnosticsSynchronizedOutputActive(void) { return atomic_load_explicit(&gSpatialSynchronizedActive,memory_order_acquire); }
+
+void AISpatialDiagnosticsCaptureSynchronizedOutput(const float *originalLeft, const float *originalRight,
+    const float *preLeft, const float *preRight, const float *outputLeft, const float *outputRight,
+    const float *foregroundLeft, const float *foregroundRight, UInt32 frames, double sampleRate,
+    uint64_t outputSample, uint64_t epoch, UInt32 downstreamDelay) {
+    if (!frames || !atomic_load_explicit(&gCaptureEnabled,memory_order_acquire) ||
+        !atomic_load_explicit(&gCaptureRawEnabled,memory_order_relaxed) || atomic_load(&gSpatialClipClosed)) return;
+    uint32_t start=atomic_load_explicit(&gSpatialClipCursor,memory_order_relaxed), bits=0;
+    float rate=(float)sampleRate; memcpy(&bits,&rate,sizeof(bits));
+    if (start>=ASSpatialClipMaxFrames) return;
+    uint64_t sourceStart=outputSample>=downstreamDelay ? outputSample-downstreamDelay : 0;
+    if (start && (sourceStart!=atomic_load(&gSpatialClipBaseSample)+start || epoch!=atomic_load(&gSpatialClipEpoch) ||
+        bits!=atomic_load(&gSpatialClipRateBits) || downstreamDelay!=atomic_load(&gSpatialDownstreamDelay))) {
+        atomic_store(&gSpatialClipClosed,YES); return; /* never stitch across route/epoch gaps */
+    }
+    if (!start) {
+        atomic_store(&gSpatialClipBaseSample,sourceStart); atomic_store(&gSpatialClipHasBaseSample,YES);
+        atomic_store(&gSpatialClipEpoch,epoch); atomic_store(&gSpatialClipRateBits,bits);
+        atomic_store(&gSpatialDownstreamDelay,downstreamDelay);
+    }
+    uint32_t count=MIN(frames,(UInt32)ASSpatialClipMaxFrames-start);
+    memcpy(gSpatialOriginalClip[0]+start,originalLeft,count*sizeof(float)); memcpy(gSpatialOriginalClip[1]+start,originalRight,count*sizeof(float));
+    memcpy(gSpatialPreClip[0]+start,preLeft,count*sizeof(float)); memcpy(gSpatialPreClip[1]+start,preRight,count*sizeof(float));
+    memcpy(gSpatialTerminalClip[0]+start,outputLeft,count*sizeof(float)); memcpy(gSpatialTerminalClip[1]+start,outputRight,count*sizeof(float));
+    if (foregroundLeft && foregroundRight) {
+        memcpy(gSpatialForegroundClip[0]+start,foregroundLeft,count*sizeof(float)); memcpy(gSpatialForegroundClip[1]+start,foregroundRight,count*sizeof(float));
+    } else {
+        for (uint32_t i=0;i<count;i++) { gSpatialForegroundClip[0][start+i]=preLeft[i]-originalLeft[i]; gSpatialForegroundClip[1][start+i]=preRight[i]-originalRight[i]; }
+    }
+    atomic_store(&gSpatialPreCursor,start+count); atomic_store(&gSpatialTerminalCursor,start+count); atomic_store(&gSpatialForegroundCursor,start+count);
+    atomic_store_explicit(&gSpatialSynchronizedActive,YES,memory_order_release);
+    atomic_store_explicit(&gSpatialClipCursor,start+count,memory_order_release);
 }
 
 void AISpatialDiagnosticsCaptureEventForegroundPCM(const float *left, const float *right, UInt32 frames, double sampleRate) {
@@ -189,8 +235,8 @@ void AISpatialDiagnosticsCapturePCM(const AudioBufferList *data, UInt32 frames,
         if (rawFrames) memcpy(gCaptureRaw[rawSlot][1], gCaptureRaw[rawSlot][0], rawFrames * sizeof(float));
     }
     if (rawFrames && (!data->mNumberBuffers || !data->mBuffers[0].mData)) record.raw_frames = 0;
-    if (collectRaw && data->mNumberBuffers >= 2 && data->mBuffers[0].mData && data->mBuffers[1].mData && isFloat && format->mBitsPerChannel==32)
-        ASCaptureClipOriginal((const float *)data->mBuffers[0].mData,(const float *)data->mBuffers[1].mData,frames,record.sample_start);
+    /* Audible A/B clips are published atomically by the terminal output path,
+       independent of the lossy observer ring above. */
     gCaptureRing[rawSlot] = record;
     atomic_store_explicit(&gCaptureHead, head + 1, memory_order_release);
 }
@@ -278,7 +324,7 @@ static NSString *ASCSV(id value) {
     return [NSString stringWithFormat:@"\"%@\"",[s stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
 }
 static NSArray *ASTimelineColumns(void) {
-    return @[@"session_id",@"second",@"start_time",@"end_time",@"samples",@"windows_submitted",@"windows_completed",@"input_rms",@"input_peak",@"vocal_rms",@"vocal_peak",@"instrumental_rms",@"instrumental_peak",@"mix_rms",@"mix_peak",@"reconstruction_error_rms",@"mixture_gain",@"input_to_vocal_db",@"input_to_mix_db",@"above_one",@"nan_count",@"infinity_count",@"inference_min_ms",@"inference_avg_ms",@"inference_max_ms",@"inference_p95_ms",@"queue_wait_avg_ms",@"queue_depth_max",@"dropped_buffers",@"memory_bytes",@"memory_measurement_time",@"errors",@"warnings", @"source", @"stream_epoch", @"playback_position_seconds", @"playback_position_evidence", @"windows_formed", @"skipped_windows", @"streaming_callback_blocks", @"streaming_callback_frames", @"duplicate_callback_blocks", @"input_buffer_frames", @"output_buffer_frames", @"additional_latency_seconds", @"additional_latency_evidence", @"stem_drift_samples", @"underrun_frames", @"overflow_blocks", @"fallback_transitions", @"fallback_frames_this_second", @"stem_frames_this_second", @"spatial_events_scheduled", @"spatial_events_scheduled_total", @"spatial_events_applied", @"spatial_events_rejected", @"spatial_events_cancelled", @"spatial_base_frames", @"spatial_changed_frames", @"spatial_delta_peak", @"spatial_delta_rms", @"rendered_stem_frames", @"rendered_fallback_frames", @"spatial_renderer", @"actual_renderer_type", @"selected_profile_id", @"selected_profile_name", @"events_detected", @"events_selected", @"events_activated", @"events_rendered", @"events_mixed", @"events_submitted_to_output", @"events_completed", @"events_cancelled_stale_epoch", @"events_cancelled_late", @"frames_spatial_renderer_this_second", @"frames_bypassed_this_second", @"frames_fallback_output_this_second", @"actual_spatial_live", @"current_stream_epoch", @"terminal_output_frames", @"self_test", @"diagnostic_telemetry_dropped", @"thermal_state", @"temperature_celsius", @"stem_stats_scope", @"inference_scope"];
+    return @[@"session_id",@"second",@"start_time",@"end_time",@"samples",@"windows_submitted",@"windows_completed",@"input_rms",@"input_peak",@"vocal_rms",@"vocal_peak",@"instrumental_rms",@"instrumental_peak",@"mix_rms",@"mix_peak",@"reconstruction_error_rms",@"mixture_gain",@"input_to_vocal_db",@"input_to_mix_db",@"above_one",@"nan_count",@"infinity_count",@"inference_min_ms",@"inference_avg_ms",@"inference_max_ms",@"inference_p95_ms",@"queue_wait_avg_ms",@"queue_depth_max",@"dropped_buffers",@"memory_bytes",@"memory_measurement_time",@"errors",@"warnings", @"source", @"stream_epoch", @"playback_position_seconds", @"playback_position_evidence", @"windows_formed", @"skipped_windows", @"streaming_callback_blocks", @"streaming_callback_frames", @"duplicate_callback_blocks", @"input_buffer_frames", @"output_buffer_frames", @"additional_latency_seconds", @"additional_latency_evidence", @"stem_drift_samples", @"underrun_frames", @"overflow_blocks", @"fallback_transitions", @"fallback_frames_this_second", @"stem_frames_this_second", @"spatial_events_scheduled", @"spatial_events_scheduled_total", @"spatial_events_applied", @"spatial_events_rejected", @"spatial_events_cancelled", @"spatial_base_frames", @"spatial_changed_frames", @"spatial_delta_peak", @"spatial_delta_rms", @"rendered_stem_frames", @"rendered_fallback_frames", @"spatial_renderer", @"actual_renderer_type", @"selected_profile_id", @"selected_profile_name", @"events_detected", @"events_selected", @"events_activated", @"events_rendered", @"events_mixed", @"events_submitted_to_output", @"events_completed", @"events_cancelled_stale_epoch", @"events_cancelled_late", @"events_rejected_capacity", @"events_rejected_duplicate", @"frames_spatial_renderer_this_second", @"frames_bypassed_this_second", @"frames_fallback_output_this_second", @"frames_spatial_renderer_total", @"frames_bypassed_total", @"frames_fallback_output_total", @"actual_spatial_live", @"current_stream_epoch", @"terminal_output_frames", @"self_test", @"event_trace_dropped", @"diagnostic_telemetry_dropped", @"thermal_state", @"temperature_celsius", @"stem_stats_scope", @"inference_scope"];
 }
 static NSString *ASRoot(void) { NSString *base=NSSearchPathForDirectoriesInDomains(NSCachesDirectory,NSUserDomainMask,YES).firstObject ?: NSTemporaryDirectory(); return [base stringByAppendingPathComponent:@"Croma/AI Spatial/Diagnostics"]; }
 @interface AISpatialDiagnostics ()
@@ -375,6 +421,7 @@ void AISpatialDiagnosticsExport(BOOL includeDebug, void (^completion)(NSArray<NS
         atomic_store_explicit(&gSpatialClipRateBits, 0, memory_order_release);
         atomic_store_explicit(&gSpatialClipBaseSample, 0, memory_order_relaxed);
         atomic_store_explicit(&gSpatialClipHasBaseSample, NO, memory_order_release);
+        atomic_store(&gSpatialClipEpoch,0); atomic_store(&gSpatialDownstreamDelay,0); atomic_store(&gSpatialClipClosed,NO); atomic_store(&gSpatialSynchronizedActive,NO);
         AISpatialDiagnosticsSetRealtimeCaptureLevel(level);
         AISpatialDiagnosticsSetRealtimeCaptureEnabled(YES);
         _captureTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,_writer);
@@ -566,27 +613,33 @@ static NSData *ASSpatialWAV(const float *left, const float *right, NSUInteger fr
     const float *spatialRight=terminalAvailable ? gSpatialTerminalClip[1] : gSpatialPreClip[1];
     NSData *original=ASSpatialWAV(gSpatialOriginalClip[0],gSpatialOriginalClip[1],frames,ratef), *spatial=ASSpatialWAV(spatialLeft,spatialRight,frames,ratef);
     if (!original || !spatial) return;
-    NSMutableData *difference=[NSMutableData dataWithLength:frames*2*sizeof(float)]; float *d=difference.mutableBytes;
-    for(NSUInteger i=0;i<frames;i++){d[i*2]=spatialLeft[i]-gSpatialOriginalClip[0][i];d[i*2+1]=spatialRight[i]-gSpatialOriginalClip[1][i];}
+    float *differenceLeft=calloc(frames,sizeof(float)), *differenceRight=calloc(frames,sizeof(float)); if(!differenceLeft || !differenceRight) { free(differenceLeft); free(differenceRight); return; }
+    for(NSUInteger i=0;i<frames;i++){differenceLeft[i]=spatialLeft[i]-gSpatialOriginalClip[0][i];differenceRight[i]=spatialRight[i]-gSpatialOriginalClip[1][i];}
+    NSData *difference=ASSpatialWAV(differenceLeft,differenceRight,frames,ratef);
     NSData *foreground=ASSpatialWAV(gSpatialForegroundClip[0],gSpatialForegroundClip[1],frames,ratef);
     [original writeToURL:[clips URLByAppendingPathComponent:@"Original.wav"] options:NSDataWritingAtomic error:nil]; [spatial writeToURL:[clips URLByAppendingPathComponent:@"Spatial.wav"] options:NSDataWritingAtomic error:nil]; [difference writeToURL:[clips URLByAppendingPathComponent:@"Difference.wav"] options:NSDataWritingAtomic error:nil]; [foreground writeToURL:[clips URLByAppendingPathComponent:@"Event-Foreground.wav"] options:NSDataWritingAtomic error:nil];
     ASMetrics originalMetrics={0}, spatialMetrics={0}, differenceMetrics={0}, foregroundMetrics={0}; NSUInteger changed=0;
     for(NSUInteger i=0;i<frames;i++) {
         ASMetricsAdd(&originalMetrics,gSpatialOriginalClip[0][i]); ASMetricsAdd(&originalMetrics,gSpatialOriginalClip[1][i]);
         ASMetricsAdd(&spatialMetrics,spatialLeft[i]); ASMetricsAdd(&spatialMetrics,spatialRight[i]);
-        ASMetricsAdd(&differenceMetrics,d[i*2]); ASMetricsAdd(&differenceMetrics,d[i*2+1]);
+        ASMetricsAdd(&differenceMetrics,differenceLeft[i]); ASMetricsAdd(&differenceMetrics,differenceRight[i]);
         ASMetricsAdd(&foregroundMetrics,gSpatialForegroundClip[0][i]); ASMetricsAdd(&foregroundMetrics,gSpatialForegroundClip[1][i]);
         changed += spatialLeft[i] != gSpatialOriginalClip[0][i]; changed += spatialRight[i] != gSpatialOriginalClip[1][i];
     }
     uint64_t base=atomic_load_explicit(&gSpatialClipBaseSample,memory_order_acquire);
+    NSDictionary *live=(AISpatialLiveStatusSnapshot ? AISpatialLiveStatusSnapshot() : nil) ?: @{};
     NSDictionary *report=@{ @"sample_rate":@(ratef), @"frames":@(frames), @"channels":@2,
         @"start_sample":@(base), @"end_sample":@(base+frames), @"start_time_seconds":@((double)base/ratef), @"end_time_seconds":@((double)(base+frames)/ratef),
         @"original_rms":@(ASRMS(originalMetrics)), @"original_peak":@(originalMetrics.peak), @"spatial_rms":@(ASRMS(spatialMetrics)), @"spatial_peak":@(spatialMetrics.peak),
         @"difference_rms":@(ASRMS(differenceMetrics)), @"difference_peak":@(differenceMetrics.peak), @"event_foreground_rms":@(ASRMS(foregroundMetrics)), @"event_foreground_peak":@(foregroundMetrics.peak),
         @"changed_samples":@(changed), @"changed_sample_percent":@(100.0*(double)changed/MAX((NSUInteger)1,frames*2)),
-        @"original_source":@"AudioUnit callback input before Spatial", @"spatial_source":terminalAvailable ? @"terminal output buffer after Spatial and JamesDSP" : @"pre-JamesDSP Spatial; terminal callback unavailable", @"terminal_output_verified":@(terminalAvailable), @"event_foreground_source":@"pre-JamesDSP Spatial minus Original" };
+        @"original_source":@"AudioUnit callback input before Spatial", @"spatial_source":terminalAvailable ? @"terminal output buffer after Spatial and JamesDSP, aligned to its source frames" : @"pre-JamesDSP Spatial; terminal callback unavailable", @"terminal_output_verified":@(terminalAvailable), @"synchronized_temporal_alignment":@(atomic_load(&gSpatialClipHasBaseSample) && !atomic_load(&gSpatialClipClosed)), @"downstream_delay_frames":@(atomic_load(&gSpatialDownstreamDelay)), @"clip_epoch":@(atomic_load(&gSpatialClipEpoch)), @"event_foreground_source":@"pre-JamesDSP Spatial minus Original",
+        @"events_rendered":live[@"spatial_events_rendered"] ?: @0, @"events_mixed":live[@"spatial_events_mixed"] ?: @0, @"events_submitted_to_output":live[@"spatial_events_submitted"] ?: @0, @"events_completed":live[@"spatial_events_completed"] ?: @0,
+        @"frames_processed_by_renderer":live[@"renderer_frames_total"] ?: @{}, @"actual_renderer_type":live[@"actual_renderer"] ?: @"unavailable", @"actual_spatial_live":live[@"spatial_enabled"] ?: @NO,
+        @"selected_profile_id": [NSUserDefaults.standardUserDefaults objectForKey:ASConfigProfile] ?: @0, @"selected_profile_name": live[@"selected_profile_name"] ?: @"unavailable", @"current_stream_epoch":live[@"stream_epoch"] ?: @0 };
     [self writeJSON:report toURL:[clips URLByAppendingPathComponent:@"spatial-export.json"]];
     self->_metadata[@"spatial_export"]=report;
+    free(differenceLeft); free(differenceRight);
 }
 - (void)finishTestWithMetadata:(NSDictionary *)metadata {
     [self updateMetadata:metadata]; [self recordStage:@"Stage 10 - Final PCM / Export" event:@"test_complete" fields:metadata];
